@@ -1,0 +1,14 @@
+{
+  "name": "mbelib-classic-min",
+  "version": "1.3.0",
+  "description": "Minimal classic mbelib AMBE2450 decoder subset for Cardputer diagnostics",
+  "license": "ISC",
+  "build": {
+    "flags": [
+      "-I src"
+    ],
+    "srcFilter": [
+      "+<*>"
+    ]
+  }
+}
