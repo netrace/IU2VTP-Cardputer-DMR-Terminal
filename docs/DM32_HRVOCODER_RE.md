@@ -126,3 +126,28 @@ be considered for ESP32-S3.
 
 Do not replace the working Rust encoder until this backend produces verified
 AMBE frames.
+
+
+## Cross-version HR stability
+
+The Q15-signature routine was compared against all three public HR-vocoder
+firmwares:
+
+| HR firmware | matching offset for the signature neighborhood |
+|---|---:|
+| 0.34 | `0xBEB10` |
+| 0.37 | `0xBEE08` |
+| 0.46 | `0xBF540` (window containing the `0xBF578` constants) |
+
+At least **512 bytes** around the routine are byte-identical in 0.34, 0.37 and
+0.46.
+
+More importantly, HR 0.37 and HR 0.46 share an exact byte-for-byte run of about
+**82,363 bytes** around/after this code:
+
+- HR 0.46: roughly `0xBF201 .. 0xD33BC`
+- HR 0.37: roughly `0xBEAC9 .. 0xD2C84`
+
+This makes the area a substantially stronger codec candidate: it is a large,
+stable HR-family component rather than ordinary application code that changed
+between firmware releases.
