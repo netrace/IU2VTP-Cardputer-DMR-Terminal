@@ -36,7 +36,7 @@ PTT key
 
 ## Development phases
 
-### v1.1.0-alpha1 — PTT state machine
+### ✅ v1.1.0-alpha1 — PTT state machine
 
 No DMR voice packets are transmitted.
 
@@ -52,13 +52,18 @@ No DMR voice packets are transmitted.
 Purpose: validate key handling, press/release semantics, UI, and TX state
 ownership without transmitting anything.
 
-### v1.1.0-alpha2 — microphone pipeline
+### ✅ v1.1.0-alpha2 — microphone pipeline
 
-- Start/stop microphone capture from the PTT state.
-- Produce deterministic PCM buffers.
-- Normalize to the format required by the encoder.
-- Measure capture latency and buffer overruns.
-- Still no DMR voice TX.
+Implemented:
+- hold P starts Cardputer microphone capture;
+- speaker is stopped while the shared audio peripheral is used by the mic;
+- double-buffer capture at 16 kHz mono;
+- 320-sample / 20 ms input blocks;
+- explicit 2:1 downsample to 160-sample / 8 kHz PCM frames;
+- non-blocking PCM queue;
+- peak, queue-drop and record-failure counters;
+- speaker restored on PTT release;
+- still no DMR voice TX.
 
 ### v1.1.0-alpha3 — AMBE encode validation
 
