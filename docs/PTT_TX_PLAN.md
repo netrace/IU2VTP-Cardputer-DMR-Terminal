@@ -65,7 +65,7 @@ Implemented:
 - speaker restored on PTT release;
 - still no DMR voice TX.
 
-### 🚧 v1.1.0-alpha3 — AMBE encode validation
+### ✅ v1.1.0-alpha3 — AMBE encode validation
 
 Current alpha3 work:
 
@@ -78,8 +78,7 @@ Current alpha3 work:
 The earlier OpenDMR/OP25 candidate is GPL and is therefore not being vendored
 into this MIT project.
 
-The next alpha3 step is a Rust/FFI ESP32-S3 backend using the MIT reference
-implementation, with the upstream patent notice retained and documented.
+Completed: the Rust/FFI backend cross-builds for `xtensa-esp32s3-espidf`, links into the PlatformIO Cardputer firmware, and passes host/C-ABI round-trip tests. The upstream patent notice remains documented.
 
 ### ✅ v1.1.0-alpha4 — DMR framing
 
