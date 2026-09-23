@@ -1,8 +1,9 @@
-name: Build PTT feature branch
+name: Build Cardputer DMR Terminal
 
 on:
   push:
     branches:
+      - main
       - feature/ptt-tx
     paths:
       - "src/**"
@@ -107,16 +108,16 @@ jobs:
           IU2VTP_AMBE_RUST_LIB: ${{ github.workspace }}/rustlib/libiu2vtp_blip25_ffi.a
         run: pio run -e m5stack-stamps3
 
-      - name: Prepare alpha6 firmware asset
+      - name: Prepare v1.1.0 firmware asset
         run: |
-          cp .pio/build/m5stack-stamps3/firmware.bin              IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin
-          sha256sum IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin             > IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin.sha256
+          cp .pio/build/m5stack-stamps3/firmware.bin              IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin
+          sha256sum IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin             > IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin.sha256
 
-      - name: Upload experimental firmware
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: cardputer-alpha6-group-private-ptt
+          name: cardputer-v1.1.0
           path: |
-            IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin
-            IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin.sha256
+            IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin
+            IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin.sha256
           if-no-files-found: error
