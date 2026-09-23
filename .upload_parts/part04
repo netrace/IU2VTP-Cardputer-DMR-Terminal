@@ -1,0 +1,577 @@
+               selected ? TFT_DARKGREY : TFT_BLACK);
+            d.setTextSize(1);
+            d.setCursor(6, y);
+
+            String ssid = wifiScan[idx].ssid;
+            if (ssid.length() > 20) ssid = ssid.substring(0, 20);
+
+            d.printf("%c %-20s %d",
+                     wifiScan[idx].open ? 'O' : '*',
+                     ssid.c_str(),
+                     wifiScan[idx].rssi);
+        };
+
+        redrawRow(lastIndex);
+        redrawRow(wifiMenuIndex);
+        lastIndex = wifiMenuIndex;
+    }
+}
+
+static void configureSelectedWifi();
+
+
+
+static void clearFooter()
+{
+    auto& d = M5Cardputer.Display;
+    const int y0 = d.height() - APP_FOOTER_H;
+    d.fillRect(0, y0, d.width(), APP_FOOTER_H, TFT_BLACK);
+}
+
+
+static void drawFooter(const String& line1 = "", const String& line2 = "")
+{
+    auto& d = M5Cardputer.Display;
+    const int y0 = d.height() - APP_FOOTER_H;
+
+    clearFooter();
+    d.drawFastHLine(0, y0, d.width(), TFT_DARKGREY);
+    d.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    d.setTextSize(1);
+
+    if (line1.length()) {
+        d.setCursor(4, y0 + 3);
+        d.print(line1);
+    }
+    if (line2.length()) {
+        d.setCursor(4, y0 + 13);
+        d.print(line2);
+    }
+}
+
+static void drawScreenChrome(const String& title,
+                             const String& footer1,
+                             const String& footer2)
+{
+    drawScreenBase();
+
+    auto& d = M5Cardputer.Display;
+    d.setTextColor(TFT_CYAN, TFT_BLACK);
+    d.setTextSize(2);
+    d.setCursor(6, APP_HEADER_H + 4);
+    d.print(title);
+
+    drawFooter(footer1, footer2);
+}
+
+static void clearUiScreen()
+{
+    drawScreenBase();
+}
+
+
+static void resetTransientInputState()
+{
+    inputBuffer = "";
+    inputTitle = "";
+    inputNumericOnly = false;
+    inputSecret = false;
+    inputTarget = 0;
+    inputReturnMode = UiMode::MAIN;
+}
+
+static void renderCurrentScreen()
+{
+    switch (uiMode) {
+        case UiMode::MAIN:
+            // drawUi() owns the dynamic RX screen. Force one full render.
+            rxUiDirty = true;
+            lastUiDraw = 0;
+            return;
+
+        case UiMode::CONFIG_HOME:
+            drawConfigHome();
+            return;
+
+        case UiMode::CONFIG_PROFILES:
+            drawProfilesMenu();
+            return;
+
+        case UiMode::CONFIG_PROFILE_EDIT:
+            drawProfileEditor();
+            return;
+
+        case UiMode::CONFIG_TGS:
+            drawTgMenu();
+            return;
+
+        case UiMode::WIFI_HOME:
+            wifiHomeDirty = true;
+            drawWifiHome();
+            return;
+
+        case UiMode::WIFI_SCAN:
+            wifiScanDirty = true;
+            drawWifiScan();
+            return;
+
+        case UiMode::AUDIO_VOLUME:
+            drawVolumeMenu();
+            return;
+
+        case UiMode::TG_INPUT:
+        case UiMode::TEXT_INPUT:
+        case UiMode::WIFI_PASSWORD:
+            drawInputBox();
+            return;
+    }
+}
+
+static void navigateTo(UiMode target, bool pushCurrent)
+{
+    if (target == uiMode) {
+        if (target == UiMode::MAIN) {
+            resetTransientInputState();
+            rxUiDirty = true;
+            lastUiDraw = 0;
+        }
+        renderCurrentScreen();
+        return;
+    }
+
+    if (pushCurrent && navDepth < NAV_STACK_MAX)
+        navStack[navDepth++] = uiMode;
+
+    uiMode = target;
+
+    if (target == UiMode::MAIN) {
+        resetTransientInputState();
+        rxUiDirty = true;
+        lastUiDraw = 0;
+    }
+
+    renderCurrentScreen();
+}
+
+static void navigateBack(UiMode fallback)
+{
+    UiMode target = fallback;
+
+    if (navDepth > 0)
+        target = navStack[--navDepth];
+
+    uiMode = target;
+
+    if (target == UiMode::MAIN) {
+        resetTransientInputState();
+        rxUiDirty = true;
+        lastUiDraw = 0;
+    }
+
+    renderCurrentScreen();
+}
+
+static void resetNavigation(UiMode target)
+{
+    navDepth = 0;
+    uiMode = target;
+
+    if (target == UiMode::MAIN) {
+        resetTransientInputState();
+        rxUiDirty = true;
+        lastUiDraw = 0;
+    }
+
+    renderCurrentScreen();
+}
+
+static void applySpeakerVolume()
+{
+    M5Cardputer.Speaker.setVolume(speakerVolume);
+}
+
+static void setSpeakerVolume(int value)
+{
+    if (value < 0) value = 0;
+    if (value > 255) value = 255;
+    speakerVolume = (uint8_t)value;
+    applySpeakerVolume();
+    saveSettings();
+}
+
+static void drawVolumeMenu()
+{
+    auto& d = M5Cardputer.Display;
+    drawScreenChrome("Volume",
+                     "FN+LEFT/RIGHT = -/+ 10",
+                     "FN+UP/DOWN = -/+ 1  ESC=back");
+
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    d.setTextSize(3);
+    d.setCursor(74, APP_HEADER_H + 42);
+    d.printf("%u", speakerVolume);
+
+    int barX = 15;
+    int barY = APP_HEADER_H + 78;
+    int barW = d.width() - 30;
+    int barH = 14;
+
+    d.drawRect(barX, barY, barW, barH, TFT_DARKGREY);
+    int fill = (barW - 2) * speakerVolume / 255;
+    if (fill > 0)
+        d.fillRect(barX + 1, barY + 1, fill, barH - 2, TFT_GREEN);
+}
+
+static void drawConfigHome()
+{
+    auto& d = M5Cardputer.Display;
+    drawScreenChrome("Settings",
+                     "FN+UP/DOWN  ENTER=open",
+                     "ESC=back");
+
+    const char* rows[] = {
+        "Start / return to RX",
+        "DMR Server",
+        "Talkgroup",
+        "Wi-Fi",
+        "Volume"
+    };
+
+    d.setTextSize(1);
+    for (int i = 0; i < 5; ++i) {
+        int y = APP_HEADER_H + 31 + i * 18;
+        bool selected = (i == menuIndex);
+        if (selected)
+            d.fillRect(4, y - 2, d.width() - 8, 16, TFT_DARKGREY);
+
+        d.setTextColor(selected ? TFT_YELLOW : TFT_WHITE,
+                       selected ? TFT_DARKGREY : TFT_BLACK);
+        d.setCursor(9, y);
+        d.print(rows[i]);
+    }
+}
+
+static void drawProfilesMenu()
+{
+    auto& d = M5Cardputer.Display;
+    drawScreenChrome(setupFlowActive ? "2. DMR Server" : "DMR Server",
+                     "ENTER=open / use if ready",
+                     "A=new  D=delete  ESC=back");
+
+    d.setTextSize(1);
+    for (int i = 0; i < profileCount; ++i) {
+        int y = APP_HEADER_H + 31 + i * 18;
+        bool selected = (i == menuIndex);
+        bool active = (i == activeProfileIndex);
+        bool ready = profileReady(i);
+
+        if (selected)
+            d.fillRect(3, y - 2, d.width() - 6, 16, TFT_DARKGREY);
+
+        d.setTextColor(selected ? TFT_YELLOW :
+                       active ? TFT_GREEN :
+                       ready ? TFT_WHITE : TFT_ORANGE,
+                       selected ? TFT_DARKGREY : TFT_BLACK);
+
+        d.setCursor(6, y);
+        d.printf("%c %-12s %s",
+                 active ? '>' : ' ',
+                 profiles[i].name,
+                 ready ? (active ? "ACTIVE" : "READY") : "NOT SET");
+    }
+}
+
+static void drawProfileEditor()
+{
+    auto& d = M5Cardputer.Display;
+    DmrProfile& p = profiles[editProfileIndex];
+
+    drawScreenChrome(p.name[0] ? String(p.name) : String("DMR Profile"),
+                     "ENTER=edit/confirm",
+                     "ESC=back");
+
+    const char* labels[] = {"Name", "Host", "Radio ID", "Password", "SAVE AND USE"};
+    String vals[5] = {
+        String(p.name),
+        String(p.host),
+        p.radioId ? String(p.radioId) : String("(missing)"),
+        p.password[0] ? "********" : "(missing)",
+        profileReady(editProfileIndex) ? "Enter" : "Complete required fields"
+    };
+
+    d.setTextSize(1);
+    for (int i = 0; i < 5; ++i) {
+        int y = APP_HEADER_H + 31 + i * 18;
+        bool selected = (i == editFieldIndex);
+        if (selected)
+            d.fillRect(3, y - 2, d.width() - 6, 16, TFT_DARKGREY);
+
+        d.setTextColor(selected ? TFT_YELLOW :
+                       (i == 4 && !profileReady(editProfileIndex)) ? TFT_ORANGE : TFT_WHITE,
+                       selected ? TFT_DARKGREY : TFT_BLACK);
+        d.setCursor(6, y);
+
+        String v = vals[i];
+        if (v.length() > 25) v = v.substring(0, 25);
+        d.printf("%s: %s", labels[i], v.c_str());
+    }
+}
+
+static void drawTgMenu()
+{
+    auto& d = M5Cardputer.Display;
+    drawScreenChrome(setupFlowActive ? "3. Talkgroup" : "Talkgroup",
+                     setupFlowActive ? "ENTER=USE AND START RX" : "ENTER=edit TG",
+                     "A=add  D=delete  ESC=back");
+
+    d.setTextSize(1);
+    int visible = min((int)favoriteTGCount, 5);
+    int first = 0;
+    if (menuIndex >= 5) first = menuIndex - 4;
+
+    for (int row = 0; row < visible; ++row) {
+        int i = first + row;
+        if (i >= favoriteTGCount) break;
+
+        int y = APP_HEADER_H + 31 + row * 18;
+        bool selected = (i == menuIndex);
+        if (selected)
+            d.fillRect(3, y - 2, d.width() - 6, 16, TFT_DARKGREY);
+
+        d.setTextColor(selected ? TFT_YELLOW :
+                       i == activeTGIndex ? TFT_GREEN : TFT_WHITE,
+                       selected ? TFT_DARKGREY : TFT_BLACK);
+        d.setCursor(8, y);
+        d.printf("%c TG %lu",
+                 i == activeTGIndex ? '>' : ' ',
+                 (unsigned long)favoriteTGs[i]);
+    }
+}
+
+static void beginTextInput(const String& title, const String& initial,
+                           bool numericOnly, bool secret, int target)
+{
+    UiMode returnMode = uiMode;
+
+    resetTransientInputState();
+
+    inputReturnMode = returnMode;
+    inputTitle = title;
+    inputBuffer = initial;
+    inputNumericOnly = numericOnly;
+    inputSecret = secret;
+    inputTarget = target;
+
+    uiMode = UiMode::TEXT_INPUT;
+    drawInputBox();
+}
+
+static void beginTgInput()
+{
+    resetTransientInputState();
+
+    inputReturnMode = UiMode::MAIN;
+    inputTitle = "Enter TG";
+    inputBuffer = "";
+    inputNumericOnly = true;
+    inputSecret = false;
+    inputTarget = 1000;
+
+    uiMode = UiMode::TG_INPUT;
+    drawInputBox();
+}
+
+static void drawInputBox()
+{
+    auto& d = M5Cardputer.Display;
+
+    static UiMode lastMode = UiMode::MAIN;
+    static String lastTitle = "";
+    static String lastShown = "";
+
+    bool entering = (lastMode != uiMode) || (lastTitle != inputTitle);
+
+    if (entering) {
+        drawScreenChrome(inputTitle,
+                         inputNumericOnly ? "Numbers only  ENTER=OK" : "ENTER=OK",
+                         "DEL=delete  ESC=cancel");
+
+        d.drawRect(5, APP_HEADER_H + 45, d.width() - 10, 28, TFT_DARKGREY);
+
+        lastShown = "";
+        lastMode = uiMode;
+        lastTitle = inputTitle;
+    }
+
+    String shown;
+    if (inputSecret) {
+        for (size_t i = 0; i < inputBuffer.length(); ++i) shown += '*';
+    } else {
+        shown = inputBuffer;
+    }
+
+    if (shown.length() > 34)
+        shown = shown.substring(shown.length() - 34);
+
+    if (shown != lastShown || entering) {
+        d.fillRect(7, APP_HEADER_H + 47, d.width() - 14, 24, TFT_BLACK);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+        d.setTextSize(1);
+        d.setCursor(10, APP_HEADER_H + 55);
+
+        if (shown.length())
+            d.print(shown);
+        else {
+            d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            d.print(inputSecret ? "password..." : "type...");
+        }
+
+        int cursorX = 10 + min((int)shown.length(), 32) * 6;
+        if (cursorX < d.width() - 8)
+            d.drawFastVLine(cursorX, APP_HEADER_H + 53, 10, TFT_WHITE);
+
+        lastShown = shown;
+    }
+}
+
+static bool navUp()
+{
+    return M5Cardputer.Keyboard.keysState().fn &&
+           M5Cardputer.Keyboard.isKeyPressed(';');
+}
+static bool navDown()
+{
+    return M5Cardputer.Keyboard.keysState().fn &&
+           M5Cardputer.Keyboard.isKeyPressed('.');
+}
+static bool navLeft()
+{
+    return M5Cardputer.Keyboard.keysState().fn &&
+           M5Cardputer.Keyboard.isKeyPressed(',');
+}
+static bool navRight()
+{
+    return M5Cardputer.Keyboard.keysState().fn &&
+           M5Cardputer.Keyboard.isKeyPressed('/');
+}
+
+
+static void enterProfileStep(bool guided)
+{
+    setupFlowActive = guided;
+
+    if (activeProfileIndex < profileCount)
+        menuIndex = activeProfileIndex;
+    else
+        menuIndex = 0;
+
+    if (uiMode == UiMode::CONFIG_PROFILES) {
+        renderCurrentScreen();
+    } else {
+        navigateTo(UiMode::CONFIG_PROFILES);
+    }
+}
+
+static void enterTalkgroupStep(bool guided)
+{
+    setupFlowActive = guided;
+    menuIndex = (activeTGIndex < favoriteTGCount) ? activeTGIndex : 0;
+
+    if (uiMode == UiMode::CONFIG_TGS) {
+        renderCurrentScreen();
+    } else {
+        navigateTo(UiMode::CONFIG_TGS);
+    }
+}
+
+static void routeAfterWifiConnected()
+{
+    normalizeActiveProfile();
+
+    if (!activeProfileReady()) {
+        setUiNotice("Wi-Fi OK. Select a DMR server.");
+        enterProfileStep(true);
+        return;
+    }
+
+    // If there is exactly one usable profile (e.g. only HamThings),
+    // do not force the user through unrelated profiles.
+    int readyCount = 0;
+    for (uint8_t i = 0; i < profileCount; ++i)
+        if (profileReady(i)) readyCount++;
+
+    if (setupFlowActive && readyCount == 1) {
+        enterTalkgroupStep(true);
+        return;
+    }
+
+    if (setupFlowActive) {
+        enterProfileStep(true);
+        return;
+    }
+
+    uiMode = UiMode::CONFIG_HOME;
+    menuIndex = 0;
+    drawConfigHome();
+}
+
+static void commitTextInput()
+{
+    if (inputTarget == 1000) { // direct TG entry
+        uint32_t tg = (uint32_t)inputBuffer.toInt();
+        if (tg > 0 && tg <= 0xFFFFFF)
+            switchTalkgroup(tg, true);
+
+        // Return through the navigation framework so RX is invalidated/redrawn.
+        resetNavigation(UiMode::MAIN);
+        return;
+    }
+
+    if (inputTarget >= 2000 && inputTarget < 2100) {
+        int index = inputTarget - 2000;
+        if (index >= 0 && index < favoriteTGCount) {
+            uint32_t tg = (uint32_t)inputBuffer.toInt();
+            if (tg > 0 && tg <= 0xFFFFFF) {
+                favoriteTGs[index] = tg;
+                if (index == activeTGIndex) activeTG = tg;
+                saveSettings();
+            }
+        }
+        uiMode = inputReturnMode;
+        renderCurrentScreen();
+        return;
+    }
+
+    if (inputTarget == 4000) {
+        snprintf(wifiConfig.password, sizeof(wifiConfig.password),
+                 "%s", inputBuffer.c_str());
+        saveWifiConfig();
+
+        clearUiScreen();
+        M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5Cardputer.Display.setCursor(8, APP_HEADER_H + 40);
+        M5Cardputer.Display.print("Connecting to Wi-Fi...");
+
+        bool ok = connectSavedWifi(15000);
+
+        if (ok) {
+            setupFlowActive = true;
+            routeAfterWifiConnected();
+        } else {
+            setUiNotice("Wi-Fi connection failed");
+            uiMode = UiMode::WIFI_HOME;
+            wifiHomeDirty = true;
+            drawWifiHome();
+        }
+        return;
+    }
+
+    if (inputTarget >= 3000 && inputTarget < 3100) {
+        int packed = inputTarget - 3000;
+        int pidx = packed / 10;
+        int field = packed % 10;
+        if (pidx >= 0 && pidx < profileCount) {
+            DmrProfile& p = profiles[pidx];
+            if (field == 0) snprintf(p.name, sizeof(p.name), "%s", inputBuffer.c_str());
+            if (field == 1) snprintf(p.host, sizeof(p.host), "%s", inputBuffer.c_str());
+            if (field == 2) p.ra
