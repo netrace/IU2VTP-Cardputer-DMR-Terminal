@@ -35,18 +35,6 @@ jobs:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 0
 
-      - name: Create release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh api "repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists"
-          else
-            gh api --method POST "repos/${{ github.repository }}/git/refs" \
-              -f ref="refs/tags/${TAG}" \
-              -f sha="${TARGET_SHA}"
-          fi
-
       - name: Download validated v1.1.1 firmware artifact
         env:
           GH_TOKEN: ${{ github.token }}
