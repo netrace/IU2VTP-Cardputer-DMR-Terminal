@@ -12,8 +12,8 @@ extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.1.0-alpha1";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha1";
+static constexpr const char* APP_VERSION = "1.1.0-alpha2";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha2";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -46,7 +46,7 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0-alpha1
+// IU2VTP Cardputer DMR Terminal v1.1.0-alpha2
 // Experimental PTT state machine.
 // Voice TX remains hard-blocked in this alpha.
 // ============================================================
@@ -85,16 +85,33 @@ enum class State {
 // Experimental TX/PTT state. Alpha1 deliberately does not send DMR voice.
 enum class TxState {
     IDLE,
-    PTT_HELD_TEST
+    PTT_HELD_CAPTURE
 };
 
 TxState txState = TxState::IDLE;
 unsigned long txStateStartedMs = 0;
 bool pttWasDown = false;
 
-static bool txTestActive()
+static constexpr uint32_t TX_MIC_RATE = 16000;
+static constexpr size_t TX_MIC_SAMPLES_16K = 320; // 20 ms
+static constexpr size_t TX_PCM_SAMPLES_8K = 160;  // 20 ms
+
+struct TxPcmFrame {
+    int16_t pcm[TX_PCM_SAMPLES_8K];
+};
+
+static int16_t txMicBuffers[2][TX_MIC_SAMPLES_16K];
+static QueueHandle_t txPcmQueue = nullptr;
+static volatile uint32_t txMicFramesCaptured = 0;
+static volatile uint32_t txPcmFramesQueued = 0;
+static volatile uint32_t txPcmFramesConsumed = 0;
+static volatile uint32_t txPcmQueueDrops = 0;
+static volatile uint32_t txMicRecordFailures = 0;
+static volatile uint32_t txMicPeak = 0;
+
+static bool txCaptureActive()
 {
-    return txState == TxState::PTT_HELD_TEST;
+    return txState == TxState::PTT_HELD_CAPTURE;
 }
 
 WiFiUDP udp;
@@ -738,7 +755,7 @@ static void drawUi()
     }
 
     const bool stateChanged = !haveLast || st != lastState;
-    const bool txActive = txTestActive();
+    const bool txActive = txCaptureActive();
 
     // Redraw the RX body not only for call metadata changes, but also when
     // the ODTP/DMR state changes. Otherwise old text such as
@@ -765,7 +782,7 @@ static void drawUi()
     if (!haveLast) {
         drawScreenBase();     // ONCE, not every 100-150 ms
         drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
-                   "HOLD P=PTT TEST  ENTER=TG  M=CFG");
+                   "HOLD P=PTT MIC  ENTER=TG  M=CFG");
     }
 
     if (headerChanged) {
@@ -774,7 +791,7 @@ static void drawUi()
         d.setTextColor(TFT_WHITE, bg);
         d.setTextSize(1);
         d.setCursor(5, APP_HEADER_H + 6);
-        d.printf("%s %s", profileName(), txActive ? "PTT TEST" : st.c_str());
+        d.printf("%s %s", profileName(), txActive ? "PTT MIC" : st.c_str());
         d.setCursor(W - 92, APP_HEADER_H + 6);
         d.printf("WiFi %ddBm ", rssi);
         lastState = st;
@@ -794,7 +811,7 @@ static void drawUi()
         // Speaker / callsign
         String speaker;
         if (txActive) {
-            speaker = "PTT HELD - TX DISABLED";
+            speaker = "PTT MIC - TX DISABLED";
         } else if (ci.metadataValid) {
             if (strlen(ci.callsign)) speaker = ci.callsign;
             else if (ci.source) speaker = String(ci.source);
@@ -814,7 +831,7 @@ static void drawUi()
         // DMR ID: never show "DMR ID: 0"
         String idline;
         if (txActive) {
-            idline = "Experimental PTT state only";
+            idline = "Mic capture 16k -> PCM 8k";
         } else if (ci.metadataValid && ci.source) {
             idline = "DMR ID: ";
             idline += String(ci.source);
@@ -840,10 +857,12 @@ static void drawUi()
 
         String line2;
         if (txActive) {
-            unsigned long txSec = (millis() - txStateStartedMs) / 1000;
-            line2 = "Held ";
-            line2 += String(txSec);
-            line2 += "s - no voice sent";
+            line2 = "Mic ";
+            line2 += String(txMicPeak);
+            line2 += " pk  q:";
+            line2 += String(txPcmQueue ? uxQueueMessagesWaiting(txPcmQueue) : 0);
+            line2 += " d:";
+            line2 += String(txPcmQueueDrops);
         } else if (ci.metadataValid && strlen(ci.name)) {
             line2 = ci.name;
         } else if (ci.metadataValid && strlen(ci.targetCall)) {
@@ -883,7 +902,7 @@ static void drawUi()
         if (txActive) {
             char tmp[64];
             unsigned long txSec = (now - txStateStartedMs) / 1000;
-            snprintf(tmp, sizeof(tmp), "PTT TEST %lus  TG %lu",
+            snprintf(tmp, sizeof(tmp), "PTT MIC %lus  TG %lu",
                      txSec, (unsigned long)activeTG);
             runtime = tmp;
         } else if (ci.active) {
@@ -2411,6 +2430,120 @@ static bool pttKeyDown()
            M5Cardputer.Keyboard.isKeyPressed('P');
 }
 
+static void txMicBufferReleased(void*, void* data, size_t length)
+{
+    if (!txCaptureActive() || !data || length != TX_MIC_SAMPLES_16K)
+        return;
+
+    const int16_t* src = static_cast<const int16_t*>(data);
+    TxPcmFrame frame;
+    uint32_t peak = 0;
+
+    for (size_t i = 0; i < TX_PCM_SAMPLES_8K; ++i) {
+        int32_t mixed = (int32_t)src[i * 2] + (int32_t)src[i * 2 + 1];
+        int16_t v = (int16_t)(mixed / 2);
+        frame.pcm[i] = v;
+
+        uint32_t a = (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
+        if (a > peak) peak = a;
+    }
+
+    txMicPeak = peak;
+    ++txMicFramesCaptured;
+
+    if (txPcmQueue) {
+        if (xQueueSend(txPcmQueue, &frame, 0) == pdTRUE)
+            ++txPcmFramesQueued;
+        else
+            ++txPcmQueueDrops;
+    }
+
+    if (txCaptureActive() &&
+        !M5Cardputer.Mic.record(static_cast<int16_t*>(data),
+                               TX_MIC_SAMPLES_16K)) {
+        ++txMicRecordFailures;
+    }
+}
+
+static bool startTxMicCapture()
+{
+    if (!txPcmQueue) {
+        txPcmQueue = xQueueCreate(12, sizeof(TxPcmFrame));
+        if (!txPcmQueue) {
+            Serial.println("[PTT/MIC] PCM queue allocation failed");
+            return false;
+        }
+    }
+
+    xQueueReset(txPcmQueue);
+    txMicFramesCaptured = 0;
+    txPcmFramesQueued = 0;
+    txPcmFramesConsumed = 0;
+    txPcmQueueDrops = 0;
+    txMicRecordFailures = 0;
+    txMicPeak = 0;
+
+    M5Cardputer.Speaker.stop();
+    M5Cardputer.Speaker.end();
+
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, txMicBufferReleased);
+    if (!M5Cardputer.Mic.begin()) {
+        Serial.println("[PTT/MIC] Mic.begin() failed");
+        M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+        M5Cardputer.Speaker.begin();
+        applySpeakerVolume();
+        return false;
+    }
+
+    bool ok0 = M5Cardputer.Mic.record(txMicBuffers[0],
+                                     TX_MIC_SAMPLES_16K,
+                                     TX_MIC_RATE);
+    bool ok1 = M5Cardputer.Mic.record(txMicBuffers[1],
+                                     TX_MIC_SAMPLES_16K);
+
+    if (!ok0 || !ok1) {
+        Serial.printf("[PTT/MIC] prime failed: %d %d\n", ok0, ok1);
+        M5Cardputer.Mic.end();
+        M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+        M5Cardputer.Speaker.begin();
+        applySpeakerVolume();
+        return false;
+    }
+
+    Serial.println("[PTT/MIC] capture started: 16 kHz mono -> 8 kHz/160");
+    return true;
+}
+
+static void stopTxMicCapture()
+{
+    M5Cardputer.Mic.end();
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+
+    if (txPcmQueue)
+        xQueueReset(txPcmQueue);
+
+    M5Cardputer.Speaker.begin();
+    applySpeakerVolume();
+
+    Serial.printf("[PTT/MIC] stopped frames=%lu queued=%lu consumed=%lu drops=%lu recfail=%lu peak=%lu\n",
+                  (unsigned long)txMicFramesCaptured,
+                  (unsigned long)txPcmFramesQueued,
+                  (unsigned long)txPcmFramesConsumed,
+                  (unsigned long)txPcmQueueDrops,
+                  (unsigned long)txMicRecordFailures,
+                  (unsigned long)txMicPeak);
+}
+
+static void processTxPcmDebug()
+{
+    if (!txCaptureActive() || !txPcmQueue) return;
+
+    TxPcmFrame frame;
+    while (xQueueReceive(txPcmQueue, &frame, 0) == pdTRUE) {
+        ++txPcmFramesConsumed;
+    }
+}
+
 static void beginPttTest()
 {
     if (txState != TxState::IDLE) return;
@@ -2421,11 +2554,19 @@ static void beginPttTest()
         return;
     }
 
-    txState = TxState::PTT_HELD_TEST;
+    txState = TxState::PTT_HELD_CAPTURE;
     txStateStartedMs = millis();
+
+    if (!startTxMicCapture()) {
+        txState = TxState::IDLE;
+        txStateStartedMs = 0;
+        setUiNotice("Microphone start failed");
+        return;
+    }
+
     rxUiDirty = true;
     lastUiDraw = 0;
-    Serial.printf("[PTT] TEST START TG %lu (voice TX disabled)\n",
+    Serial.printf("[PTT] MIC START TG %lu (voice TX disabled)\n",
                   (unsigned long)activeTG);
 }
 
@@ -2436,9 +2577,12 @@ static void endPttTest()
     unsigned long elapsed = millis() - txStateStartedMs;
     txState = TxState::IDLE;
     txStateStartedMs = 0;
+
+    stopTxMicCapture();
+
     rxUiDirty = true;
     lastUiDraw = 0;
-    Serial.printf("[PTT] TEST END after %lu ms (no voice transmitted)\n",
+    Serial.printf("[PTT] MIC END after %lu ms (no voice transmitted)\n",
                   elapsed);
 }
 
@@ -3066,7 +3210,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha1");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha2");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / RX ONLY");
@@ -3231,6 +3375,7 @@ void loop()
     }
 
     handleKeyboard();
+    processTxPcmDebug();
     if (uiMode == UiMode::MAIN) {
         drawUi();
     }
