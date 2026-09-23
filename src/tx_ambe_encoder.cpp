@@ -1,13 +1,53 @@
 #include "tx_ambe_encoder.h"
 
-// Alpha3 embedded placeholder.
-//
-// The reference AMBE+2 encoder used by tools/ambe_ref is MIT-licensed
-// blip25-vocoder. It is intentionally not linked into the ESP32 firmware yet:
-// the target-side Rust/FFI build needs to be integrated and validated first.
-//
-// Keeping this backend explicitly unavailable guarantees that alpha3 cannot
-// accidentally transmit voice while the codec port is incomplete.
+#if defined(IU2VTP_TX_AMBE_RUST)
+
+#include "tx_ambe_blip25_ffi.h"
+
+static Iu2vtpAmbeEncoder* g_encoder = nullptr;
+
+bool txAmbeEncoderAvailable()
+{
+    return true;
+}
+
+const char* txAmbeEncoderBackendName()
+{
+    return "blip25-rust";
+}
+
+bool txAmbeEncoderBegin()
+{
+    if (g_encoder) return true;
+    g_encoder = iu2vtp_ambe_encoder_create();
+    return g_encoder != nullptr;
+}
+
+void txAmbeEncoderReset()
+{
+    if (g_encoder)
+        iu2vtp_ambe_encoder_reset(g_encoder);
+}
+
+void txAmbeEncoderEnd()
+{
+    if (g_encoder) {
+        iu2vtp_ambe_encoder_destroy(g_encoder);
+        g_encoder = nullptr;
+    }
+}
+
+bool txAmbeEncodePcm160(const int16_t pcm[TX_AMBE_PCM_SAMPLES],
+                        uint8_t ambe[TX_AMBE_FRAME_BYTES])
+{
+    if (!g_encoder || !pcm || !ambe) return false;
+    return iu2vtp_ambe_encode_pcm160(g_encoder, pcm, ambe);
+}
+
+#else
+
+// Safe fallback used until an ESP32-S3 Rust staticlib is supplied.
+// This keeps voice generation impossible by default.
 
 bool txAmbeEncoderAvailable()
 {
@@ -39,3 +79,5 @@ bool txAmbeEncodePcm160(const int16_t pcm[TX_AMBE_PCM_SAMPLES],
     (void)ambe;
     return false;
 }
+
+#endif
