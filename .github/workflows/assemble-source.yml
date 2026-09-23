@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p src
-          cat .upload_b64/part* | base64 -d > src/main.cpp
+          cat .upload_b64/part* | base64 -d | gzip -d > src/main.cpp
 
           expected_size=92217
           actual_size="$(wc -c < src/main.cpp | tr -d ' ')"
