@@ -2548,6 +2548,17 @@ static bool startTxMicCapture()
             return false;
         }
         txAmbeEncoderReset();
+
+        // The vocoder has one frame of algorithmic history. Prime it with
+        // 20 ms of digital silence and discard the result so the first AMBE
+        // frame sent on-air corresponds to the first captured microphone frame.
+        int16_t primePcm[TX_AMBE_PCM_SAMPLES] = {0};
+        uint8_t primeAmbe[TX_AMBE_FRAME_BYTES] = {0};
+        if (!txAmbeEncodePcm160(primePcm, primeAmbe)) {
+            Serial.println("[PTT/AMBE] encoder prime failed");
+            txAmbeEncoderEnd();
+            return false;
+        }
     } else {
         Serial.printf("[PTT/AMBE] embedded backend unavailable (%s)\n",
                       txAmbeEncoderBackendName());
