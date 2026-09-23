@@ -210,3 +210,16 @@ Required checklist:
 - network loss terminates TX
 - profile/TG changes blocked while transmitting
 - RX audio muted or stopped during TX where necessary
+
+
+## TX AMBE byte ordering validation
+
+The Rewind/Open Terminal bridge implementation that forwards 9-byte frames
+verbatim obtains those bytes from DroidStar's DMR-specific
+`mbe_vocoder_encode_dmr()`. Therefore its input is already in DMR frame
+ordering.
+
+Our MIT `blip25-vocoder` backend instead emits canonical half-rate code-vector
+bits. The feature branch intentionally converts those canonical 72 bits through
+the proven DMR `rW/rX/rY/rZ` mapping before assembling the 27-byte Rewind
+audio payload. This is symmetric with the known-good RX deinterleave path.
