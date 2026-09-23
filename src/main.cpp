@@ -12,8 +12,8 @@ extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.0.3";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.0.3";
+static constexpr const char* APP_VERSION = "1.1.0-alpha1";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha1";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -46,10 +46,9 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.0.3
-// AMBE parameter diagnostic - NO mbelib / NO FFT / NO speaker
-//
-// RX-only.
+// IU2VTP Cardputer DMR Terminal v1.1.0-alpha1
+// Experimental PTT state machine.
+// Voice TX remains hard-blocked in this alpha.
 // ============================================================
 
 static constexpr char REWIND_SIGN[] = "REWIND01";
@@ -82,6 +81,21 @@ enum class State {
     WAIT_SUB_ACK,
     SUBSCRIBED
 };
+
+// Experimental TX/PTT state. Alpha1 deliberately does not send DMR voice.
+enum class TxState {
+    IDLE,
+    PTT_HELD_TEST
+};
+
+TxState txState = TxState::IDLE;
+unsigned long txStateStartedMs = 0;
+bool pttWasDown = false;
+
+static bool txTestActive()
+{
+    return txState == TxState::PTT_HELD_TEST;
+}
 
 WiFiUDP udp;
 bool udpStarted = false;
@@ -724,6 +738,7 @@ static void drawUi()
     }
 
     const bool stateChanged = !haveLast || st != lastState;
+    const bool txActive = txTestActive();
 
     // Redraw the RX body not only for call metadata changes, but also when
     // the ODTP/DMR state changes. Otherwise old text such as
@@ -745,21 +760,21 @@ static void drawUi()
 
     int rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -127;
     bool headerChanged = stateChanged || abs(rssi - lastRssi) >= 2 ||
-                         ci.active != lastCi.active;
+                         ci.active != lastCi.active || txActive;
 
     if (!haveLast) {
         drawScreenBase();     // ONCE, not every 100-150 ms
         drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
-                   "ENTER=direct TG  M=SETTINGS");
+                   "HOLD P=PTT TEST  ENTER=TG  M=CFG");
     }
 
     if (headerChanged) {
-        uint16_t bg = ci.active ? TFT_DARKGREEN : TFT_DARKGREY;
+        uint16_t bg = txActive ? TFT_RED : (ci.active ? TFT_DARKGREEN : TFT_DARKGREY);
         d.fillRect(0, APP_HEADER_H, W, 20, bg);
         d.setTextColor(TFT_WHITE, bg);
         d.setTextSize(1);
         d.setCursor(5, APP_HEADER_H + 6);
-        d.printf("%s %s", profileName(), st.c_str());
+        d.printf("%s %s", profileName(), txActive ? "PTT TEST" : st.c_str());
         d.setCursor(W - 92, APP_HEADER_H + 6);
         d.printf("WiFi %ddBm ", rssi);
         lastState = st;
@@ -778,7 +793,9 @@ static void drawUi()
 
         // Speaker / callsign
         String speaker;
-        if (ci.metadataValid) {
+        if (txActive) {
+            speaker = "PTT HELD - TX DISABLED";
+        } else if (ci.metadataValid) {
             if (strlen(ci.callsign)) speaker = ci.callsign;
             else if (ci.source) speaker = String(ci.source);
             else speaker = "Metadata...";
@@ -796,7 +813,9 @@ static void drawUi()
 
         // DMR ID: never show "DMR ID: 0"
         String idline;
-        if (ci.metadataValid && ci.source) {
+        if (txActive) {
+            idline = "Experimental PTT state only";
+        } else if (ci.metadataValid && ci.source) {
             idline = "DMR ID: ";
             idline += String(ci.source);
         } else if (ci.active) {
@@ -820,7 +839,12 @@ static void drawUi()
         drawTextRegion(5, APP_HEADER_H + 73, W - 10, 13, TFT_BLACK, TFT_LIGHTGREY, 1, idline);
 
         String line2;
-        if (ci.metadataValid && strlen(ci.name)) {
+        if (txActive) {
+            unsigned long txSec = (millis() - txStateStartedMs) / 1000;
+            line2 = "Held ";
+            line2 += String(txSec);
+            line2 += "s - no voice sent";
+        } else if (ci.metadataValid && strlen(ci.name)) {
             line2 = ci.name;
         } else if (ci.metadataValid && strlen(ci.targetCall)) {
             line2 = "Dest: ";
@@ -856,7 +880,13 @@ static void drawUi()
         drops != lastDrops) {
 
         String runtime;
-        if (ci.active) {
+        if (txActive) {
+            char tmp[64];
+            unsigned long txSec = (now - txStateStartedMs) / 1000;
+            snprintf(tmp, sizeof(tmp), "PTT TEST %lus  TG %lu",
+                     txSec, (unsigned long)activeTG);
+            runtime = tmp;
+        } else if (ci.active) {
             char tmp[64];
             snprintf(tmp, sizeof(tmp), "RX %02lu:%02lu pkt:%lu q:%lu",
                      (unsigned long)(durationSec / 60),
@@ -1232,7 +1262,7 @@ void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
         type == PKT_DMR_TERMINATOR ||
         type == PKT_DMR_EMBEDDED ||
         type == PKT_SUPERHEADER) {
-        Serial.printf("[RX-ONLY BLOCK] TX type=0x%04X\n", type);
+        Serial.printf("[TX ALPHA BLOCK] voice TX disabled type=0x%04X\n", type);
         return;
     }
 
@@ -2375,6 +2405,55 @@ static void commitTextInput()
     }
 }
 
+static bool pttKeyDown()
+{
+    return M5Cardputer.Keyboard.isKeyPressed('p') ||
+           M5Cardputer.Keyboard.isKeyPressed('P');
+}
+
+static void beginPttTest()
+{
+    if (txState != TxState::IDLE) return;
+
+    if (uiMode != UiMode::MAIN || !dmrSessionReady()) {
+        setUiNotice("PTT unavailable: DMR not ready");
+        Serial.println("[PTT] ignored: DMR session not ready");
+        return;
+    }
+
+    txState = TxState::PTT_HELD_TEST;
+    txStateStartedMs = millis();
+    rxUiDirty = true;
+    lastUiDraw = 0;
+    Serial.printf("[PTT] TEST START TG %lu (voice TX disabled)\n",
+                  (unsigned long)activeTG);
+}
+
+static void endPttTest()
+{
+    if (txState == TxState::IDLE) return;
+
+    unsigned long elapsed = millis() - txStateStartedMs;
+    txState = TxState::IDLE;
+    txStateStartedMs = 0;
+    rxUiDirty = true;
+    lastUiDraw = 0;
+    Serial.printf("[PTT] TEST END after %lu ms (no voice transmitted)\n",
+                  elapsed);
+}
+
+static void handlePttState()
+{
+    const bool down = (uiMode == UiMode::MAIN) && pttKeyDown();
+
+    if (down && !pttWasDown)
+        beginPttTest();
+    else if (!down && pttWasDown)
+        endPttTest();
+
+    pttWasDown = down;
+}
+
 static void handleKeyboard()
 {
     if (!M5Cardputer.Keyboard.isChange() ||
@@ -2987,7 +3066,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.0.3");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha1");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / RX ONLY");
@@ -3083,6 +3162,7 @@ void setup()
 void loop()
 {
     M5Cardputer.update();
+    handlePttState();
 
     // Never reboot merely because Wi-Fi is disconnected.
     // During first-time setup this is expected, and rebooting here creates
