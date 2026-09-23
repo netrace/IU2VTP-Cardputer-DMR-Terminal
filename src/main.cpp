@@ -144,6 +144,14 @@ static constexpr uint16_t REWIND_FLAG_REAL_TIME_1 = 0x0001;
 static constexpr unsigned long TX_MAX_MS = 180000UL;
 static constexpr unsigned long TX_PACKET_PERIOD_US = 60000UL;
 
+// Diagnostic: send the well-known DMR AMBE+2 silence frame on REWIND TX.
+// This isolates protocol/session acceptance from blip25 bit ordering.
+// Set false after the Last Heard test.
+static constexpr bool TX_DIAGNOSTIC_STANDARD_SILENCE = true;
+static constexpr uint8_t TX_DMR_SILENCE_FRAME[9] = {
+    0xB9, 0xE8, 0x81, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
 struct TxDmrPacket {
     uint8_t payload[27];
 };
@@ -2776,7 +2784,12 @@ static void processTxPcmDebug()
         dmrCanonical72ToInterleaved(canonical, dmr9);
         ++txDmrFramesInterleaved;
 
-        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
+        if (TX_DIAGNOSTIC_STANDARD_SILENCE) {
+            memcpy(txDmrPacketBuild + txDmrFrameIndex * 9,
+                   TX_DMR_SILENCE_FRAME, 9);
+        } else {
+            memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
+        }
         ++txDmrFrameIndex;
 
         if (txDmrFrameIndex == 3) {
@@ -2792,7 +2805,7 @@ static void processTxPcmDebug()
             }
 
             if (txDmrPacketsBuilt == 1) {
-                Serial.print("[PTT/AMBE] first DMR-interleaved mode33 payload: ");
+                Serial.print("[PTT/AMBE] first 27-byte payload: ");
                 printHex(txLastDmrPayload, 27);
             }
         }
@@ -2921,6 +2934,9 @@ static void beginPttTest()
                   txCallModeLabel(),
                   (unsigned long)txDestinationId(),
                   (unsigned long)profileRadioId());
+
+    if (TX_DIAGNOSTIC_STANDARD_SILENCE)
+        Serial.println("[PTT/TEST] standard DMR silence payload enabled");
 }
 
 static void endPttTest()
