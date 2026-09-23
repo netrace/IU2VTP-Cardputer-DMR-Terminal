@@ -10,6 +10,7 @@ on:
       - "lib/**"
       - "scripts/**"
       - "platformio.ini"
+      - "tools/ambe_ref/**"
       - ".github/workflows/build-ptt-feature.yml"
   workflow_dispatch:
 
@@ -30,3 +31,6 @@ jobs:
 
       - name: Build Cardputer
         run: pio run -e m5stack-stamps3
+
+      - name: AMBE+2 host reference round-trip
+        run: cargo run --release --manifest-path tools/ambe_ref/Cargo.toml
