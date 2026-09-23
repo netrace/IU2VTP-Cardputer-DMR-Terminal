@@ -15,8 +15,8 @@ extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.1.0-alpha5";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha5";
+static constexpr const char* APP_VERSION = "1.1.0-alpha6";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha6";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -49,7 +49,7 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0-alpha5
+// IU2VTP Cardputer DMR Terminal v1.1.0-alpha6
 // Experimental PTT/TX branch.
 // Alpha5 enables live group-voice TX only while P is held.
 // ============================================================
@@ -76,6 +76,7 @@ enum PacketType : uint16_t {
 };
 
 static constexpr uint8_t SERVICE_OPEN_TERMINAL = 0x21;
+static constexpr uint32_t SESSION_PRIVATE_VOICE = 5;
 static constexpr uint32_t SESSION_GROUP_VOICE = 7;
 
 enum class State {
@@ -148,6 +149,31 @@ static volatile uint32_t txNetworkPacketDrops = 0;
 static volatile uint32_t txNetworkErrors = 0;
 static uint32_t txNextPacketDueUs = 0;
 static bool txSessionAnnounced = false;
+
+enum class TxCallMode {
+    GROUP,
+    PRIVATE
+};
+
+static TxCallMode txCallMode = TxCallMode::GROUP;
+static uint32_t txPrivateId = 0;
+
+static const char* txCallModeLabel()
+{
+    return txCallMode == TxCallMode::PRIVATE ? "PRIVATE" : "GROUP";
+}
+
+static uint32_t txDestinationId()
+{
+    return txCallMode == TxCallMode::PRIVATE ? txPrivateId : activeTG;
+}
+
+static uint32_t txSessionType()
+{
+    return txCallMode == TxCallMode::PRIVATE
+        ? SESSION_PRIVATE_VOICE
+        : SESSION_GROUP_VOICE;
+}
 
 // ============================================================
 // Persistent runtime configuration
@@ -810,7 +836,7 @@ static void drawUi()
     if (!haveLast) {
         drawScreenBase();     // ONCE, not every 100-150 ms
         drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
-                   "HOLD P=PTT  ENTER=TG  M=CFG");
+                   "G0=PTT  C=CALL  I=PRIVATE ID");
     }
 
     if (headerChanged) {
@@ -839,7 +865,12 @@ static void drawUi()
         // Speaker / callsign
         String speaker;
         if (txActive) {
-            speaker = "PTT DMR BUILD - NO TX";
+            speaker = txCallMode == TxCallMode::PRIVATE
+                ? "PRIVATE TRANSMITTING"
+                : "GROUP TRANSMITTING";
+        } else if (txCallMode == TxCallMode::PRIVATE) {
+            speaker = "PRIVATE ID ";
+            speaker += String(txPrivateId);
         } else if (ci.metadataValid) {
             if (strlen(ci.callsign)) speaker = ci.callsign;
             else if (ci.source) speaker = String(ci.source);
@@ -936,8 +967,12 @@ static void drawUi()
         if (txActive) {
             char tmp[64];
             unsigned long txSec = (now - txStateStartedMs) / 1000;
-            snprintf(tmp, sizeof(tmp), "TX %lus  TG %lu",
-                     txSec, (unsigned long)activeTG);
+            if (txCallMode == TxCallMode::PRIVATE)
+                snprintf(tmp, sizeof(tmp), "TX %lus  ID %lu",
+                         txSec, (unsigned long)txPrivateId);
+            else
+                snprintf(tmp, sizeof(tmp), "TX %lus  TG %lu",
+                         txSec, (unsigned long)activeTG);
             runtime = tmp;
         } else if (ci.active) {
             char tmp[64];
@@ -1296,20 +1331,28 @@ static bool sendTxSuperHeader()
 {
     uint8_t payload[32] = {0};
 
-    char target[11] = {0};
-    snprintf(target, sizeof(target), "TG%lu", (unsigned long)activeTG);
+    const uint32_t dst = txDestinationId();
+    const uint32_t sessionType = txSessionType();
 
-    rewindTxBuildGroupSuperHeader(payload,
-                                  profileRadioId(),
-                                  activeTG,
-                                  "IU2VTP",
-                                  target);
+    char target[11] = {0};
+    if (txCallMode == TxCallMode::PRIVATE)
+        snprintf(target, sizeof(target), "%lu", (unsigned long)dst);
+    else
+        snprintf(target, sizeof(target), "TG%lu", (unsigned long)dst);
+
+    rewindTxBuildSuperHeader(payload,
+                             sessionType,
+                             profileRadioId(),
+                             dst,
+                             "IU2VTP",
+                             target);
 
     const bool ok = sendRealtime(PKT_SUPERHEADER, payload, sizeof(payload));
     if (ok)
-        Serial.printf("[PTT/TX] SUPERHEADER src=%lu dst=%lu\n",
+        Serial.printf("[PTT/TX] SUPERHEADER mode=%s src=%lu dst=%lu\n",
+                      txCallModeLabel(),
                       (unsigned long)profileRadioId(),
-                      (unsigned long)activeTG);
+                      (unsigned long)dst);
     return ok;
 }
 
@@ -2260,6 +2303,46 @@ static void beginTgInput()
     drawInputBox();
 }
 
+static void beginPrivateIdInput()
+{
+    resetTransientInputState();
+
+    inputReturnMode = UiMode::MAIN;
+    inputTitle = "Private DMR ID";
+    inputBuffer = txPrivateId ? String(txPrivateId) : "";
+    inputNumericOnly = true;
+    inputSecret = false;
+    inputTarget = 1001;
+
+    uiMode = UiMode::TEXT_INPUT;
+    drawInputBox();
+}
+
+static void toggleTxCallMode()
+{
+    if (txCaptureActive()) {
+        setUiNotice("Release PTT before changing call mode");
+        return;
+    }
+
+    txCallMode = (txCallMode == TxCallMode::GROUP)
+        ? TxCallMode::PRIVATE
+        : TxCallMode::GROUP;
+
+    if (txCallMode == TxCallMode::GROUP) {
+        setUiNotice("TX mode: GROUP");
+    } else if (txPrivateId) {
+        String msg = "TX PRIVATE ID ";
+        msg += String(txPrivateId);
+        setUiNotice(msg);
+    } else {
+        setUiNotice("PRIVATE mode: press I for DMR ID");
+    }
+
+    rxUiDirty = true;
+    lastUiDraw = 0;
+}
+
 static void drawInputBox()
 {
     auto& d = M5Cardputer.Display;
@@ -2396,6 +2479,24 @@ static void routeAfterWifiConnected()
 
 static void commitTextInput()
 {
+    if (inputTarget == 1001) { // private DMR ID
+        uint32_t id = (uint32_t)inputBuffer.toInt();
+        if (id > 0 && id <= 0xFFFFFF) {
+            txPrivateId = id;
+            txCallMode = TxCallMode::PRIVATE;
+            String msg = "PRIVATE ID ";
+            msg += String(txPrivateId);
+            setUiNotice(msg);
+        } else {
+            setUiNotice("Invalid private DMR ID");
+        }
+
+        resetNavigation(UiMode::MAIN);
+        rxUiDirty = true;
+        lastUiDraw = 0;
+        return;
+    }
+
     if (inputTarget == 1000) { // direct TG entry
         uint32_t tg = (uint32_t)inputBuffer.toInt();
         if (tg > 0 && tg <= 0xFFFFFF)
@@ -2761,6 +2862,12 @@ static void beginPttTest()
         return;
     }
 
+    if (txCallMode == TxCallMode::PRIVATE && txPrivateId == 0) {
+        setUiNotice("Set private DMR ID first (I)");
+        Serial.println("[PTT] ignored: private destination missing");
+        return;
+    }
+
     txState = TxState::PTT_HELD_CAPTURE;
     txStateStartedMs = millis();
 
@@ -2787,8 +2894,9 @@ static void beginPttTest()
     rxUiDirty = true;
     lastUiDraw = 0;
 
-    Serial.printf("[PTT] TX START TG %lu src=%lu\n",
-                  (unsigned long)activeTG,
+    Serial.printf("[PTT] TX START mode=%s dst=%lu src=%lu\n",
+                  txCallModeLabel(),
+                  (unsigned long)txDestinationId(),
                   (unsigned long)profileRadioId());
 }
 
@@ -2953,6 +3061,19 @@ static void handleKeyboard()
             beginTgInput();
             return;
         }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('c') ||
+            M5Cardputer.Keyboard.isKeyPressed('C')) {
+            toggleTxCallMode();
+            return;
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('i') ||
+            M5Cardputer.Keyboard.isKeyPressed('I')) {
+            beginPrivateIdInput();
+            return;
+        }
+
         return;
     }
 
@@ -3457,7 +3578,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha5");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha6");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / TX experimental");
