@@ -2717,7 +2717,10 @@ static void abortTxSession(const char* reason)
 
     txState = TxState::IDLE;
     txStateStartedMs = 0;
-    pttWasDown = false;
+
+    // Latch the current key-down state so a BUSY/network abort cannot
+    // immediately re-key while the operator is still physically holding P.
+    pttWasDown = true;
 
     M5Cardputer.Mic.end();
     M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
