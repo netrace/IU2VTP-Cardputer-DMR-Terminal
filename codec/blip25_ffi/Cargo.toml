@@ -1,0 +1,11 @@
+[package]
+name = "iu2vtp-blip25-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+blip25-vocoder = { version = "1.0.0", default-features = false, features = ["encode", "decode"] }

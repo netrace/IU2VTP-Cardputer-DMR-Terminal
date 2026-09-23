@@ -7,13 +7,20 @@
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include "config.h"
+#include "tx_ambe_encoder.h"
+#include "dmr_ambe_mapping.h"
+#include "rewind_tx_protocol.h"
+
+// blip25 AMBE encoding uses substantially more stack than Arduino's default 8 KB loopTask.
+// Espressif officially supports overriding the loop task stack this way.
+SET_LOOP_TASK_STACK_SIZE(32 * 1024);
 
 extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.0.3";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.0.3";
+static constexpr const char* APP_VERSION = "1.1.0";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -46,10 +53,9 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.0.3
-// AMBE parameter diagnostic - NO mbelib / NO FFT / NO speaker
-//
-// RX-only.
+// IU2VTP Cardputer DMR Terminal v1.1.0
+// Verified RX/TX Rewind / Open DMR Terminal implementation.
+// G0 / BtnA is the primary hold-to-talk control; P is a keyboard fallback.
 // ============================================================
 
 static constexpr char REWIND_SIGN[] = "REWIND01";
@@ -62,6 +68,8 @@ enum PacketType : uint16_t {
     PKT_AUTHENTICATION  = 0x0003,
     PKT_REDIRECTION     = 0x0008,
     PKT_REPORT          = 0x0100,
+    PKT_BUSY_NOTICE     = 0x0200,
+    PKT_CONFIGURATION   = 0x0900,
     PKT_SUBSCRIPTION    = 0x0901,
     PKT_CANCELLING      = 0x0902,
     PKT_DMR_HEADER_FLC  = 0x0911,
@@ -73,6 +81,7 @@ enum PacketType : uint16_t {
 };
 
 static constexpr uint8_t SERVICE_OPEN_TERMINAL = 0x21;
+static constexpr uint32_t SESSION_PRIVATE_VOICE = 5;
 static constexpr uint32_t SESSION_GROUP_VOICE = 7;
 
 enum class State {
@@ -83,6 +92,45 @@ enum class State {
     SUBSCRIBED
 };
 
+// TX/PTT state.
+enum class TxState {
+    IDLE,
+    PTT_HELD_CAPTURE
+};
+
+TxState txState = TxState::IDLE;
+unsigned long txStateStartedMs = 0;
+bool pttWasDown = false;
+
+static constexpr uint32_t TX_MIC_RATE = 16000;
+static constexpr size_t TX_MIC_SAMPLES_16K = 320; // 20 ms
+static constexpr size_t TX_PCM_SAMPLES_8K = 160;  // 20 ms
+
+struct TxPcmFrame {
+    int16_t pcm[TX_PCM_SAMPLES_8K];
+};
+
+static int16_t txMicBuffers[2][TX_MIC_SAMPLES_16K];
+static QueueHandle_t txPcmQueue = nullptr;
+static volatile uint32_t txMicFramesCaptured = 0;
+static volatile uint32_t txPcmFramesQueued = 0;
+static volatile uint32_t txPcmFramesConsumed = 0;
+static volatile uint32_t txPcmQueueDrops = 0;
+static volatile uint32_t txMicRecordFailures = 0;
+static volatile uint32_t txMicPeak = 0;
+static volatile uint32_t txAmbeFramesEncoded = 0;
+static volatile uint32_t txAmbeEncodeFailures = 0;
+static volatile uint32_t txDmrFramesInterleaved = 0;
+static volatile uint32_t txDmrPacketsBuilt = 0;
+static uint8_t txDmrPacketBuild[27] = {0};
+static uint8_t txDmrFrameIndex = 0;
+static uint8_t txLastDmrPayload[27] = {0};
+
+static bool txCaptureActive()
+{
+    return txState == TxState::PTT_HELD_CAPTURE;
+}
+
 WiFiUDP udp;
 bool udpStarted = false;
 IPAddress bmIP;
@@ -90,6 +138,56 @@ IPAddress bmIP;
 State state = State::WAIT_CHALLENGE;
 
 uint32_t seqNo = 0;
+uint32_t realtimeSeqNo = 0;
+
+static constexpr uint16_t REWIND_FLAG_REAL_TIME_1 = 0x0001;
+static constexpr unsigned long TX_MAX_MS = 180000UL;
+static constexpr unsigned long TX_PACKET_PERIOD_US = 60000UL;
+
+// Optional diagnostic fallback: standard DMR AMBE+2 silence frame.
+// Keep disabled for normal live microphone TX.
+static constexpr bool TX_DIAGNOSTIC_STANDARD_SILENCE = false;
+static constexpr uint8_t TX_DMR_SILENCE_FRAME[9] = {
+    0xB9, 0xE8, 0x81, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+struct TxDmrPacket {
+    uint8_t payload[27];
+};
+
+static QueueHandle_t txDmrPacketQueue = nullptr;
+static volatile uint32_t txNetworkPacketsSent = 0;
+static volatile uint32_t txNetworkPacketDrops = 0;
+static volatile uint32_t txNetworkErrors = 0;
+static uint32_t txNextPacketDueUs = 0;
+static bool txSessionAnnounced = false;
+
+enum class TxCallMode {
+    GROUP,
+    PRIVATE
+};
+
+static TxCallMode txCallMode = TxCallMode::GROUP;
+static uint32_t txPrivateId = 0;
+
+extern uint32_t activeTG;
+
+static const char* txCallModeLabel()
+{
+    return txCallMode == TxCallMode::PRIVATE ? "PRIVATE" : "GROUP";
+}
+
+static uint32_t txDestinationId()
+{
+    return txCallMode == TxCallMode::PRIVATE ? txPrivateId : activeTG;
+}
+
+static uint32_t txSessionType()
+{
+    return txCallMode == TxCallMode::PRIVATE
+        ? SESSION_PRIVATE_VOICE
+        : SESSION_GROUP_VOICE;
+}
 
 // ============================================================
 // Persistent runtime configuration
@@ -287,6 +385,7 @@ static void drawWifiHome();
 static void drawWifiScan();
 static void drawVolumeMenu();
 static void drawInputBox();
+static void abortTxSession(const char* reason);
 
 // ------------------------------------------------------------
 // Persistent settings
@@ -724,6 +823,7 @@ static void drawUi()
     }
 
     const bool stateChanged = !haveLast || st != lastState;
+    const bool txActive = txCaptureActive();
 
     // Redraw the RX body not only for call metadata changes, but also when
     // the ODTP/DMR state changes. Otherwise old text such as
@@ -745,21 +845,21 @@ static void drawUi()
 
     int rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -127;
     bool headerChanged = stateChanged || abs(rssi - lastRssi) >= 2 ||
-                         ci.active != lastCi.active;
+                         ci.active != lastCi.active || txActive;
 
     if (!haveLast) {
         drawScreenBase();     // ONCE, not every 100-150 ms
         drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
-                   "ENTER=direct TG  M=SETTINGS");
+                   "G0=PTT  C=CALL  I=PRIVATE ID");
     }
 
     if (headerChanged) {
-        uint16_t bg = ci.active ? TFT_DARKGREEN : TFT_DARKGREY;
+        uint16_t bg = txActive ? TFT_RED : (ci.active ? TFT_DARKGREEN : TFT_DARKGREY);
         d.fillRect(0, APP_HEADER_H, W, 20, bg);
         d.setTextColor(TFT_WHITE, bg);
         d.setTextSize(1);
         d.setCursor(5, APP_HEADER_H + 6);
-        d.printf("%s %s", profileName(), st.c_str());
+        d.printf("%s %s", profileName(), txActive ? "TX" : st.c_str());
         d.setCursor(W - 92, APP_HEADER_H + 6);
         d.printf("WiFi %ddBm ", rssi);
         lastState = st;
@@ -778,7 +878,14 @@ static void drawUi()
 
         // Speaker / callsign
         String speaker;
-        if (ci.metadataValid) {
+        if (txActive) {
+            speaker = txCallMode == TxCallMode::PRIVATE
+                ? "PRIVATE TRANSMITTING"
+                : "GROUP TRANSMITTING";
+        } else if (txCallMode == TxCallMode::PRIVATE) {
+            speaker = "PRIVATE ID ";
+            speaker += String(txPrivateId);
+        } else if (ci.metadataValid) {
             if (strlen(ci.callsign)) speaker = ci.callsign;
             else if (ci.source) speaker = String(ci.source);
             else speaker = "Metadata...";
@@ -796,7 +903,9 @@ static void drawUi()
 
         // DMR ID: never show "DMR ID: 0"
         String idline;
-        if (ci.metadataValid && ci.source) {
+        if (txActive) {
+            idline = "PCM -> AMBE -> DMR / no TX";
+        } else if (ci.metadataValid && ci.source) {
             idline = "DMR ID: ";
             idline += String(ci.source);
         } else if (ci.active) {
@@ -820,7 +929,20 @@ static void drawUi()
         drawTextRegion(5, APP_HEADER_H + 73, W - 10, 13, TFT_BLACK, TFT_LIGHTGREY, 1, idline);
 
         String line2;
-        if (ci.metadataValid && strlen(ci.name)) {
+        if (txActive) {
+            line2 = "Mic ";
+            line2 += String(txMicPeak);
+            line2 += " pk  q:";
+            line2 += String(txPcmQueue ? uxQueueMessagesWaiting(txPcmQueue) : 0);
+            line2 += " d:";
+            line2 += String(txPcmQueueDrops);
+            if (txAmbeEncoderAvailable()) {
+                line2 += " a:";
+                line2 += String(txAmbeFramesEncoded);
+                line2 += " p:";
+                line2 += String(txDmrPacketsBuilt);
+            }
+        } else if (ci.metadataValid && strlen(ci.name)) {
             line2 = ci.name;
         } else if (ci.metadataValid && strlen(ci.targetCall)) {
             line2 = "Dest: ";
@@ -856,7 +978,17 @@ static void drawUi()
         drops != lastDrops) {
 
         String runtime;
-        if (ci.active) {
+        if (txActive) {
+            char tmp[64];
+            unsigned long txSec = (now - txStateStartedMs) / 1000;
+            if (txCallMode == TxCallMode::PRIVATE)
+                snprintf(tmp, sizeof(tmp), "TX %lus  ID %lu",
+                         txSec, (unsigned long)txPrivateId);
+            else
+                snprintf(tmp, sizeof(tmp), "TX %lus  TG %lu",
+                         txSec, (unsigned long)activeTG);
+            runtime = tmp;
+        } else if (ci.active) {
             char tmp[64];
             snprintf(tmp, sizeof(tmp), "RX %02lu:%02lu pkt:%lu q:%lu",
                      (unsigned long)(durationSec / 60),
@@ -1027,62 +1159,6 @@ void printAmbe49(const AmbeParams49 &p)
 
 
 
-static inline uint8_t dmrBitMSB(const uint8_t *frame9, int bitIndex)
-{
-    return (frame9[bitIndex >> 3] >> (7 - (bitIndex & 7))) & 1U;
-}
-
-// DMR AMBE interleave schedule (DSD / dmr_utils lineage).
-static const uint8_t DMR_rW[36] = {
-    0,1,0,1,0,1,
-    0,1,0,1,0,1,
-    0,1,0,1,0,1,
-    0,1,0,1,0,2,
-    0,2,0,2,0,2,
-    0,2,0,2,0,2
-};
-
-static const uint8_t DMR_rX[36] = {
-    23,10,22,9,21,8,
-    20,7,19,6,18,5,
-    17,4,16,3,15,2,
-    14,1,13,0,12,10,
-    11,9,10,8,9,7,
-    8,6,7,5,6,4
-};
-
-static const uint8_t DMR_rY[36] = {
-    0,2,0,2,0,2,
-    0,2,0,3,0,3,
-    1,3,1,3,1,3,
-    1,3,1,3,1,3,
-    1,3,1,3,1,3,
-    1,3,1,3,1,3
-};
-
-static const uint8_t DMR_rZ[36] = {
-    5,3,4,2,3,1,
-    2,0,1,13,0,12,
-    22,11,21,10,20,9,
-    19,8,18,7,17,6,
-    16,5,15,4,14,3,
-    13,2,12,1,11,0
-};
-
-static void dmr72ToMbelibFrame(const uint8_t *frame9, char ambe_fr[4][24])
-{
-    memset(ambe_fr, 0, 4 * 24 * sizeof(char));
-
-    int bitIndex = 0;
-    for (int i = 0; i < 36; ++i) {
-        const char bit1 = (char)dmrBitMSB(frame9, bitIndex++);
-        const char bit0 = (char)dmrBitMSB(frame9, bitIndex++);
-
-        ambe_fr[DMR_rW[i]][DMR_rX[i]] = bit1;
-        ambe_fr[DMR_rY[i]][DMR_rZ[i]] = bit0;
-    }
-}
-
 static void audioTask(void *param)
 {
     (void)param;
@@ -1134,7 +1210,7 @@ static void audioTask(void *param)
             memset(ambe_d, 0, sizeof(ambe_d));
 
             // Critical correction: DMR-specific deinterleave.
-            dmr72ToMbelibFrame(frame9, ambe_fr);
+            dmrInterleaved72ToMbelib(frame9, ambe_fr);
 
             int errs = 0;
             int errs2 = 0;
@@ -1220,36 +1296,161 @@ static void queueAudioPacket(const uint8_t *payload27)
 // ODTP control
 // ------------------------------------------------------------
 
-void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
+static bool sendRewindPacket(uint16_t type, uint16_t flags, uint32_t sequence,
+                             const uint8_t* payload, uint16_t payloadLen)
 {
     if (WiFi.status() != WL_CONNECTED || !udpStarted) {
-        Serial.printf("[TX CTRL] skip type=0x%04X: network not ready\n", type);
-        return;
-    }
-
-    if (type == PKT_DMR_AUDIO ||
-        type == PKT_DMR_HEADER_FLC ||
-        type == PKT_DMR_TERMINATOR ||
-        type == PKT_DMR_EMBEDDED ||
-        type == PKT_SUPERHEADER) {
-        Serial.printf("[RX-ONLY BLOCK] TX type=0x%04X\n", type);
-        return;
+        Serial.printf("[TX] skip type=0x%04X: network not ready\n", type);
+        return false;
     }
 
     uint8_t h[HEADER_LEN] = {0};
+    rewindTxBuildHeader(h, type, flags, sequence, payloadLen);
 
-    memcpy(h, REWIND_SIGN, 8);
-    put16le(h + 8, type);
-    put16le(h + 10, 0);
-    put32le(h + 12, seqNo++);
-    put16le(h + 16, payloadLen);
+    if (!udp.beginPacket(bmIP, profilePort()))
+        return false;
 
-    udp.beginPacket(bmIP, profilePort());
-    udp.write(h, sizeof(h));
-    if (payload && payloadLen) {
-        udp.write(payload, payloadLen);
+    size_t written = udp.write(h, sizeof(h));
+    if (payload && payloadLen)
+        written += udp.write(payload, payloadLen);
+
+    if (written != sizeof(h) + payloadLen) {
+        udp.endPacket();
+        return false;
     }
-    udp.endPacket();
+
+    return udp.endPacket() == 1;
+}
+
+void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
+{
+    if (!sendRewindPacket(type, 0, seqNo++, payload, payloadLen))
+        Serial.printf("[TX CTRL] failed type=0x%04X\n", type);
+}
+
+static bool sendRealtime(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
+{
+    // Z3DMR uses AtomicInteger.incrementAndGet(): first realtime packet is 1.
+    const uint32_t seq = ++realtimeSeqNo;
+    if (type != PKT_DMR_AUDIO || seq < 8) {
+        Serial.printf("[TX RT] type=0x%04X flags=0x%04X seq=%lu len=%u",
+                      type, REWIND_FLAG_REAL_TIME_1,
+                      (unsigned long)seq, payloadLen);
+        if (payload && payloadLen) {
+            Serial.print(" payload=");
+            printHex(payload, payloadLen);
+        } else {
+            Serial.println();
+        }
+    }
+    const bool ok = sendRewindPacket(type, REWIND_FLAG_REAL_TIME_1,
+                                     seq, payload, payloadLen);
+    if (!ok) {
+        ++txNetworkErrors;
+        Serial.printf("[TX RT] failed type=0x%04X seq=%lu\n",
+                      type, (unsigned long)seq);
+    }
+    return ok;
+}
+
+static bool sendTxVoiceHeaders()
+{
+    uint8_t payload[REWIND_TX_VOICE_LC_LEN] = {0};
+    rewindTxBuildVoiceLc(payload,
+                         profileRadioId(),
+                         txDestinationId(),
+                         txCallMode == TxCallMode::PRIVATE);
+
+    // Z3DMR's ODTP transmitter sends the Voice LC Header twice before the
+    // first 0x0920 audio packet. Match that sequence exactly.
+    if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
+        return false;
+    if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
+        return false;
+
+    Serial.printf("[PTT/TX] VOICE LC x2 mode=%s src=%lu dst=%lu payload=",
+                  txCallModeLabel(),
+                  (unsigned long)profileRadioId(),
+                  (unsigned long)txDestinationId());
+    printHex(payload, sizeof(payload));
+    return true;
+}
+
+static uint8_t gf256Mul(uint8_t a, uint8_t b)
+{
+    uint8_t r = 0;
+    while (b) {
+        if (b & 1U) r ^= a;
+        const bool hi = (a & 0x80U) != 0;
+        a <<= 1;
+        if (hi) a ^= 0x1DU; // GF(256), primitive polynomial x^8+x^4+x^3+x^2+1
+        b >>= 1;
+    }
+    return r;
+}
+
+static void buildTxVoiceLc(uint8_t out[12])
+{
+    memset(out, 0, 12);
+
+    // DMR Full Link Control: FLCO, FID, service options, destination, source.
+    out[0] = (txCallMode == TxCallMode::PRIVATE) ? 0x03 : 0x00;
+    out[1] = 0x00;
+    out[2] = 0x00;
+
+    const uint32_t dst = txDestinationId();
+    const uint32_t src = profileRadioId();
+
+    out[3] = (uint8_t)((dst >> 16) & 0xFF);
+    out[4] = (uint8_t)((dst >> 8) & 0xFF);
+    out[5] = (uint8_t)(dst & 0xFF);
+    out[6] = (uint8_t)((src >> 16) & 0xFF);
+    out[7] = (uint8_t)((src >> 8) & 0xFF);
+    out[8] = (uint8_t)(src & 0xFF);
+
+    // RS(12,9) parity, same generator used by BrandMeister/DMRHost:
+    // 64*x^3 + 56*x^2 + 14*x + 1. Voice-LC parity is masked with 0x96.
+    uint8_t p0 = 0, p1 = 0, p2 = 0;
+    for (size_t i = 0; i < 9; ++i) {
+        const uint8_t d = out[i] ^ p2;
+        p2 = p1 ^ gf256Mul(14, d);
+        p1 = p0 ^ gf256Mul(56, d);
+        p0 = gf256Mul(64, d);
+    }
+
+    out[9]  = p2 ^ 0x96;
+    out[10] = p1 ^ 0x96;
+    out[11] = p0 ^ 0x96;
+}
+
+static bool sendTxVoiceHeader()
+{
+    uint8_t lc[12];
+    buildTxVoiceLc(lc);
+
+    // Z3DMR sends the 0x0911 Voice LC header twice before AMBE audio.
+    bool ok = true;
+    for (int i = 0; i < 2; ++i) {
+        if (!sendRealtime(PKT_DMR_HEADER_FLC, lc, sizeof(lc)))
+            ok = false;
+    }
+
+    if (ok) {
+        Serial.printf("[PTT/TX] VOICE_LC x2 mode=%s src=%lu dst=%lu: ",
+                      txCallModeLabel(),
+                      (unsigned long)profileRadioId(),
+                      (unsigned long)txDestinationId());
+        printHex(lc, sizeof(lc));
+    }
+    return ok;
+}
+
+static bool sendTxTerminator()
+{
+    const bool ok = sendRealtime(PKT_DMR_TERMINATOR, nullptr, 0);
+    if (ok)
+        Serial.println("[PTT/TX] TERMINATOR");
+    return ok;
 }
 
 void sendKeepalive()
@@ -1296,6 +1497,15 @@ void sendAuthentication(const uint8_t token[4])
     state = State::WAIT_AUTH_ACK;
 
     Serial.println("[TX CTRL] AUTHENTICATION");
+}
+
+void sendConfiguration()
+{
+    uint8_t payload[4] = {0};
+    // REWIND_OPTION_SUPER_HEADER = 1 << 0
+    put32le(payload, 1);
+    sendControl(PKT_CONFIGURATION, payload, sizeof(payload));
+    Serial.println("[TX CTRL] CONFIGURATION SuperHeader");
 }
 
 void sendSubscription()
@@ -1382,6 +1592,7 @@ static void startActiveConnection()
     if (!resolveActiveServer()) return;
 
     seqNo = 0;
+    realtimeSeqNo = 0;
     lastKeepaliveTx = 0;
     lastKeepaliveAck = 0;
     lastSubscribeTx = 0;
@@ -1393,6 +1604,10 @@ static void startActiveConnection()
 
 static void switchTalkgroup(uint32_t newTG, bool saveAsCurrent)
 {
+    if (txCaptureActive()) {
+        setUiNotice("Release PTT before changing TG");
+        return;
+    }
     if (newTG == 0 || newTG > 0xFFFFFF) return;
     uint32_t oldTG = activeTG;
 
@@ -1419,6 +1634,10 @@ static void switchTalkgroup(uint32_t newTG, bool saveAsCurrent)
 
 static void switchProfile(int delta)
 {
+    if (txCaptureActive()) {
+        setUiNotice("Release PTT before changing server");
+        return;
+    }
     if (profileCount == 0) return;
 
     int start = activeProfileIndex;
@@ -1484,6 +1703,7 @@ void handlePacket(uint8_t* buf, size_t n)
                 state == State::WAIT_CHALLENGE) {
                 Serial.println("[AUTH] LOGIN ACCEPTED");
                 state = State::AUTHENTICATED;
+                sendConfiguration();
                 sendSubscription();
             }
             break;
@@ -1588,7 +1808,8 @@ void handlePacket(uint8_t* buf, size_t n)
             if (state == State::SUBSCRIBED && plen == 27) {
                 ++audioPackets;
                 lastVoicePacketMs = millis();
-                queueAudioPacket(p);
+                if (!txCaptureActive())
+                    queueAudioPacket(p);
 
                 if (callInfoMutex && xSemaphoreTake(callInfoMutex, 0) == pdTRUE) {
                     // Audio proves RX activity, but it does NOT contain source/destination.
@@ -1634,9 +1855,18 @@ void handlePacket(uint8_t* buf, size_t n)
             }
             break;
 
+        case PKT_BUSY_NOTICE:
+            Serial.print("[RX] BUSY: ");
+            printHex(p, plen);
+            if (txCaptureActive())
+                abortTxSession("server busy");
+            break;
+
         case PKT_FAILURE:
             Serial.print("[RX] FAILURE: ");
             printHex(p, plen);
+            if (txCaptureActive())
+                abortTxSession("server failure");
             break;
 
         case PKT_CLOSE:
@@ -2172,6 +2402,46 @@ static void beginTgInput()
     drawInputBox();
 }
 
+static void beginPrivateIdInput()
+{
+    resetTransientInputState();
+
+    inputReturnMode = UiMode::MAIN;
+    inputTitle = "Private DMR ID";
+    inputBuffer = txPrivateId ? String(txPrivateId) : "";
+    inputNumericOnly = true;
+    inputSecret = false;
+    inputTarget = 1001;
+
+    uiMode = UiMode::TEXT_INPUT;
+    drawInputBox();
+}
+
+static void toggleTxCallMode()
+{
+    if (txCaptureActive()) {
+        setUiNotice("Release PTT before changing call mode");
+        return;
+    }
+
+    txCallMode = (txCallMode == TxCallMode::GROUP)
+        ? TxCallMode::PRIVATE
+        : TxCallMode::GROUP;
+
+    if (txCallMode == TxCallMode::GROUP) {
+        setUiNotice("TX mode: GROUP");
+    } else if (txPrivateId) {
+        String msg = "TX PRIVATE ID ";
+        msg += String(txPrivateId);
+        setUiNotice(msg);
+    } else {
+        setUiNotice("PRIVATE mode: press I for DMR ID");
+    }
+
+    rxUiDirty = true;
+    lastUiDraw = 0;
+}
+
 static void drawInputBox()
 {
     auto& d = M5Cardputer.Display;
@@ -2308,6 +2578,24 @@ static void routeAfterWifiConnected()
 
 static void commitTextInput()
 {
+    if (inputTarget == 1001) { // private DMR ID
+        uint32_t id = (uint32_t)inputBuffer.toInt();
+        if (id > 0 && id <= 0xFFFFFF) {
+            txPrivateId = id;
+            txCallMode = TxCallMode::PRIVATE;
+            String msg = "PRIVATE ID ";
+            msg += String(txPrivateId);
+            setUiNotice(msg);
+        } else {
+            setUiNotice("Invalid private DMR ID");
+        }
+
+        resetNavigation(UiMode::MAIN);
+        rxUiDirty = true;
+        lastUiDraw = 0;
+        return;
+    }
+
     if (inputTarget == 1000) { // direct TG entry
         uint32_t tg = (uint32_t)inputBuffer.toInt();
         if (tg > 0 && tg <= 0xFFFFFF)
@@ -2373,6 +2661,415 @@ static void commitTextInput()
         renderCurrentScreen();
         return;
     }
+}
+
+static bool pttKeyDown()
+{
+    return M5Cardputer.BtnA.isPressed() ||
+           M5Cardputer.Keyboard.isKeyPressed('p') ||
+           M5Cardputer.Keyboard.isKeyPressed('P');
+}
+
+static void txMicBufferReleased(void*, void* data, size_t length)
+{
+    if (!txCaptureActive() || !data || length != TX_MIC_SAMPLES_16K)
+        return;
+
+    const int16_t* src = static_cast<const int16_t*>(data);
+    TxPcmFrame frame;
+    uint32_t peak = 0;
+
+    for (size_t i = 0; i < TX_PCM_SAMPLES_8K; ++i) {
+        int32_t mixed = (int32_t)src[i * 2] + (int32_t)src[i * 2 + 1];
+        int16_t v = (int16_t)(mixed / 2);
+        frame.pcm[i] = v;
+
+        uint32_t a = (v < 0) ? (uint32_t)(-v) : (uint32_t)v;
+        if (a > peak) peak = a;
+    }
+
+    txMicPeak = peak;
+    ++txMicFramesCaptured;
+
+    if (txPcmQueue) {
+        if (xQueueSend(txPcmQueue, &frame, 0) == pdTRUE)
+            ++txPcmFramesQueued;
+        else
+            ++txPcmQueueDrops;
+    }
+
+    if (txCaptureActive() &&
+        !M5Cardputer.Mic.record(static_cast<int16_t*>(data),
+                               TX_MIC_SAMPLES_16K)) {
+        ++txMicRecordFailures;
+    }
+}
+
+static bool startTxMicCapture()
+{
+    if (!txPcmQueue) {
+        txPcmQueue = xQueueCreate(12, sizeof(TxPcmFrame));
+        if (!txPcmQueue) {
+            Serial.println("[PTT/MIC] PCM queue allocation failed");
+            return false;
+        }
+    }
+
+    if (!txDmrPacketQueue) {
+        txDmrPacketQueue = xQueueCreate(12, sizeof(TxDmrPacket));
+        if (!txDmrPacketQueue) {
+            Serial.println("[PTT/TX] DMR packet queue allocation failed");
+            return false;
+        }
+    }
+
+    xQueueReset(txPcmQueue);
+    xQueueReset(txDmrPacketQueue);
+    txMicFramesCaptured = 0;
+    txPcmFramesQueued = 0;
+    txPcmFramesConsumed = 0;
+    txPcmQueueDrops = 0;
+    txMicRecordFailures = 0;
+    txMicPeak = 0;
+    txAmbeFramesEncoded = 0;
+    txAmbeEncodeFailures = 0;
+    txDmrFramesInterleaved = 0;
+    txDmrPacketsBuilt = 0;
+    txNetworkPacketsSent = 0;
+    txNetworkPacketDrops = 0;
+    txNetworkErrors = 0;
+    txDmrFrameIndex = 0;
+    txNextPacketDueUs = micros();
+    txSessionAnnounced = false;
+    memset(txDmrPacketBuild, 0, sizeof(txDmrPacketBuild));
+    memset(txLastDmrPayload, 0, sizeof(txLastDmrPayload));
+
+    if (txAmbeEncoderAvailable()) {
+        if (!txAmbeEncoderBegin()) {
+            Serial.println("[PTT/AMBE] encoder begin failed");
+            return false;
+        }
+        txAmbeEncoderReset();
+
+        // The vocoder has one frame of algorithmic history. Prime it with
+        // 20 ms of digital silence and discard the result so the first AMBE
+        // frame sent on-air corresponds to the first captured microphone frame.
+        int16_t primePcm[TX_AMBE_PCM_SAMPLES] = {0};
+        uint8_t primeAmbe[TX_AMBE_FRAME_BYTES] = {0};
+        if (!txAmbeEncodePcm160(primePcm, primeAmbe)) {
+            Serial.println("[PTT/AMBE] encoder prime failed");
+            txAmbeEncoderEnd();
+            return false;
+        }
+    } else {
+        Serial.printf("[PTT/AMBE] embedded backend unavailable (%s)\n",
+                      txAmbeEncoderBackendName());
+    }
+
+    M5Cardputer.Speaker.stop();
+    M5Cardputer.Speaker.end();
+
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, txMicBufferReleased);
+    if (!M5Cardputer.Mic.begin()) {
+        Serial.println("[PTT/MIC] Mic.begin() failed");
+        M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+        M5Cardputer.Speaker.begin();
+        applySpeakerVolume();
+        return false;
+    }
+
+    bool ok0 = M5Cardputer.Mic.record(txMicBuffers[0],
+                                     TX_MIC_SAMPLES_16K,
+                                     TX_MIC_RATE);
+    bool ok1 = M5Cardputer.Mic.record(txMicBuffers[1],
+                                     TX_MIC_SAMPLES_16K);
+
+    if (!ok0 || !ok1) {
+        Serial.printf("[PTT/MIC] prime failed: %d %d\n", ok0, ok1);
+        M5Cardputer.Mic.end();
+        M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+        M5Cardputer.Speaker.begin();
+        applySpeakerVolume();
+        return false;
+    }
+
+    Serial.println("[PTT/MIC] capture started: 16 kHz mono -> 8 kHz/160");
+    return true;
+}
+
+static void stopTxMicCapture()
+{
+    M5Cardputer.Mic.end();
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+
+    if (txAmbeEncoderAvailable())
+        txAmbeEncoderEnd();
+
+    if (txPcmQueue)
+        xQueueReset(txPcmQueue);
+
+    M5Cardputer.Speaker.begin();
+    applySpeakerVolume();
+
+    Serial.printf("[PTT/MIC] stopped frames=%lu queued=%lu consumed=%lu drops=%lu recfail=%lu peak=%lu ambe=%lu encfail=%lu dmrframes=%lu dmrpkts=%lu\n",
+                  (unsigned long)txMicFramesCaptured,
+                  (unsigned long)txPcmFramesQueued,
+                  (unsigned long)txPcmFramesConsumed,
+                  (unsigned long)txPcmQueueDrops,
+                  (unsigned long)txMicRecordFailures,
+                  (unsigned long)txMicPeak,
+                  (unsigned long)txAmbeFramesEncoded,
+                  (unsigned long)txAmbeEncodeFailures,
+                  (unsigned long)txDmrFramesInterleaved,
+                  (unsigned long)txDmrPacketsBuilt);
+    Serial.printf("[PTT/TX] network sent=%lu drops=%lu errors=%lu\n",
+                  (unsigned long)txNetworkPacketsSent,
+                  (unsigned long)txNetworkPacketDrops,
+                  (unsigned long)txNetworkErrors);
+}
+
+static void processTxPcmDebug()
+{
+    if (!txPcmQueue) return;
+
+    // Consume at most one 20 ms PCM frame per loop iteration. Draining the
+    // entire PCM queue in one burst can create several 60 ms DMR packets at
+    // once and overflow the paced network queue even though the long-term
+    // production rate is correct.
+    TxPcmFrame frame;
+    if (xQueueReceive(txPcmQueue, &frame, 0) != pdTRUE)
+        return;
+
+    ++txPcmFramesConsumed;
+
+    if (txAmbeEncoderAvailable()) {
+        uint8_t canonical[TX_AMBE_FRAME_BYTES] = {0};
+
+        if (!txAmbeEncodePcm160(frame.pcm, canonical)) {
+            ++txAmbeEncodeFailures;
+            return;
+        }
+
+        ++txAmbeFramesEncoded;
+
+        // REWIND 0x0920 carries three 9-byte DMR AMBE frames. blip25
+        // returns the carrier-neutral c0..c3 code vectors serialized in
+        // canonical order, so apply the DMR 72-bit rW/rX/rY/rZ interleave
+        // for each individual 9-byte frame. We still do NOT build a 33-byte
+        // RF burst here; REWIND transports the three frame9 values directly.
+        uint8_t dmr9[9] = {0};
+        dmrCanonical72ToInterleaved(canonical, dmr9);
+        ++txDmrFramesInterleaved;
+
+        if (TX_DIAGNOSTIC_STANDARD_SILENCE) {
+            memcpy(txDmrPacketBuild + txDmrFrameIndex * 9,
+                   TX_DMR_SILENCE_FRAME, 9);
+        } else {
+            memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
+        }
+        ++txDmrFrameIndex;
+
+        if (txDmrFrameIndex == 3) {
+            memcpy(txLastDmrPayload, txDmrPacketBuild, 27);
+            ++txDmrPacketsBuilt;
+            txDmrFrameIndex = 0;
+
+            TxDmrPacket pkt;
+            memcpy(pkt.payload, txLastDmrPayload, sizeof(pkt.payload));
+            if (!txDmrPacketQueue ||
+                xQueueSend(txDmrPacketQueue, &pkt, 0) != pdTRUE) {
+                ++txNetworkPacketDrops;
+            }
+
+            if (txDmrPacketsBuilt == 1) {
+                Serial.print("[PTT/AMBE] first 27-byte payload: ");
+                printHex(txLastDmrPayload, 27);
+            }
+        }
+    }
+}
+
+static void processTxNetwork()
+{
+    if (!txSessionAnnounced || !txDmrPacketQueue) return;
+
+    const uint32_t nowUs = micros();
+    if ((int32_t)(nowUs - txNextPacketDueUs) < 0)
+        return;
+
+    TxDmrPacket pkt;
+    if (xQueueReceive(txDmrPacketQueue, &pkt, 0) == pdTRUE) {
+        if (sendRealtime(PKT_DMR_AUDIO, pkt.payload, sizeof(pkt.payload)))
+            ++txNetworkPacketsSent;
+
+        txNextPacketDueUs += TX_PACKET_PERIOD_US;
+
+        // If the loop was stalled badly, do not burst old voice packets.
+        if ((int32_t)(nowUs - txNextPacketDueUs) >
+            (int32_t)(TX_PACKET_PERIOD_US * 3UL)) {
+            txNextPacketDueUs = nowUs + TX_PACKET_PERIOD_US;
+        }
+    }
+}
+
+static void flushTxNetworkQueue(unsigned long maxWaitMs)
+{
+    const unsigned long start = millis();
+
+    while (txDmrPacketQueue &&
+           uxQueueMessagesWaiting(txDmrPacketQueue) > 0 &&
+           millis() - start < maxWaitMs &&
+           WiFi.status() == WL_CONNECTED) {
+        processTxNetwork();
+        delay(1);
+    }
+}
+
+static void abortTxSession(const char* reason)
+{
+    if (txState == TxState::IDLE) return;
+
+    Serial.printf("[PTT/TX] abort: %s\n", reason ? reason : "unknown");
+
+    txState = TxState::IDLE;
+    txStateStartedMs = 0;
+
+    // Latch the current key-down state so a BUSY/network abort cannot
+    // immediately re-key while the operator is still physically holding P.
+    pttWasDown = true;
+
+    M5Cardputer.Mic.end();
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+    if (txAmbeEncoderAvailable())
+        txAmbeEncoderEnd();
+
+    if (txPcmQueue) xQueueReset(txPcmQueue);
+    if (txDmrPacketQueue) xQueueReset(txDmrPacketQueue);
+
+    if (txSessionAnnounced && WiFi.status() == WL_CONNECTED && udpStarted)
+        sendTxTerminator();
+
+    txSessionAnnounced = false;
+    txDmrFrameIndex = 0;
+
+    M5Cardputer.Speaker.begin();
+    applySpeakerVolume();
+    rxUiDirty = true;
+    lastUiDraw = 0;
+}
+
+static void beginPttTest()
+{
+    if (txState != TxState::IDLE) return;
+
+    if (uiMode != UiMode::MAIN || !dmrSessionReady()) {
+        setUiNotice("PTT unavailable: DMR not ready");
+        Serial.println("[PTT] ignored: DMR session not ready");
+        return;
+    }
+
+    if (!txAmbeEncoderAvailable()) {
+        setUiNotice("PTT unavailable: AMBE TX backend missing");
+        Serial.println("[PTT] ignored: embedded AMBE backend unavailable");
+        return;
+    }
+
+    if (txCallMode == TxCallMode::PRIVATE && txPrivateId == 0) {
+        setUiNotice("Set private DMR ID first (I)");
+        Serial.println("[PTT] ignored: private destination missing");
+        return;
+    }
+
+    txState = TxState::PTT_HELD_CAPTURE;
+    txStateStartedMs = millis();
+
+    if (!startTxMicCapture()) {
+        txState = TxState::IDLE;
+        txStateStartedMs = 0;
+        setUiNotice("Microphone start failed");
+        return;
+    }
+
+    // Drop queued RX voice and enter explicit half-duplex mode.
+    if (audioQueue) xQueueReset(audioQueue);
+
+    // Keep realtimeSeqNo monotonic for the whole REWIND connection.
+    // It is reset only by startActiveConnection(), matching reference clients.
+    txNextPacketDueUs = micros();
+
+    // Match Z3DMR's working ODTP TX sequence: two DMR Voice LC
+    // headers (0x0911) open the call. SUPERHEADER (0x0928) is not used
+    // as the TX call opener.
+    if (!sendTxVoiceHeaders()) {
+        abortTxSession("voice header failed");
+        setUiNotice("PTT TX start failed");
+        return;
+    }
+
+    txSessionAnnounced = true;
+    rxUiDirty = true;
+    lastUiDraw = 0;
+
+    Serial.printf("[PTT] TX START mode=%s dst=%lu src=%lu\n",
+                  txCallModeLabel(),
+                  (unsigned long)txDestinationId(),
+                  (unsigned long)profileRadioId());
+
+    if (TX_DIAGNOSTIC_STANDARD_SILENCE)
+        Serial.println("[PTT/TEST] standard DMR silence payload enabled");
+}
+
+static void endPttTest()
+{
+    if (txState == TxState::IDLE) return;
+
+    const unsigned long elapsed = millis() - txStateStartedMs;
+
+    // Clear the active capture state BEFORE Mic.end(). A buffer-release callback
+    // may run while the driver is shutting down; it must never requeue capture.
+    txState = TxState::IDLE;
+
+    M5Cardputer.Mic.end();
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+
+    // Drain complete PCM frames already captured before the stop.
+    processTxPcmDebug();
+    flushTxNetworkQueue(1000);
+
+    // A trailing 1-2 AMBE frame partial packet is intentionally discarded
+    // rather than inventing an unverified silence codeword.
+    txDmrFrameIndex = 0;
+
+    if (txSessionAnnounced)
+        sendTxTerminator();
+
+    txSessionAnnounced = false;
+    txStateStartedMs = 0;
+
+    stopTxMicCapture();
+
+    if (audioQueue) xQueueReset(audioQueue);
+
+    rxUiDirty = true;
+    lastUiDraw = 0;
+
+    Serial.printf("[PTT] TX END after %lu ms sent=%lu neterr=%lu drop=%lu\n",
+                  elapsed,
+                  (unsigned long)txNetworkPacketsSent,
+                  (unsigned long)txNetworkErrors,
+                  (unsigned long)txNetworkPacketDrops);
+}
+
+static void handlePttState()
+{
+    const bool down = (uiMode == UiMode::MAIN) && pttKeyDown();
+
+    if (down && !pttWasDown)
+        beginPttTest();
+    else if (!down && pttWasDown)
+        endPttTest();
+
+    pttWasDown = down;
 }
 
 static void handleKeyboard()
@@ -2483,6 +3180,19 @@ static void handleKeyboard()
             beginTgInput();
             return;
         }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('c') ||
+            M5Cardputer.Keyboard.isKeyPressed('C')) {
+            toggleTxCallMode();
+            return;
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('i') ||
+            M5Cardputer.Keyboard.isKeyPressed('I')) {
+            beginPrivateIdInput();
+            return;
+        }
+
         return;
     }
 
@@ -2987,10 +3697,19 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.0.3");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha6");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
-    Serial.println("classic mbelib / speaker 48 kHz / RX ONLY");
+    Serial.println("classic mbelib / speaker 48 kHz / TX experimental");
+    Serial.printf("[BOOT] loopTask stack=%lu bytes free=%u\n",
+                  (unsigned long)getArduinoLoopTaskStackSize(),
+                  (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+
+    if (!dmrAmbeMappingSelfTest()) {
+        Serial.println("[STOP] DMR AMBE mapping self-test FAILED");
+        while (true) delay(1000);
+    }
+    Serial.println("[DMR MAP] canonical <-> interleaved self-test OK");
 
     loadSettings();
 
@@ -3083,6 +3802,7 @@ void setup()
 void loop()
 {
     M5Cardputer.update();
+    handlePttState();
 
     // Never reboot merely because Wi-Fi is disconnected.
     // During first-time setup this is expected, and rebooting here creates
@@ -3151,6 +3871,18 @@ void loop()
     }
 
     handleKeyboard();
+    processTxNetwork();
+    processTxPcmDebug();
+
+    if (txCaptureActive()) {
+        if (WiFi.status() != WL_CONNECTED || !udpStarted) {
+            abortTxSession("network lost");
+        } else if (millis() - txStateStartedMs >= TX_MAX_MS) {
+            abortTxSession("TX timeout");
+            setUiNotice("PTT stopped: TX timeout");
+        }
+    }
+
     if (uiMode == UiMode::MAIN) {
         drawUi();
     }
@@ -3185,6 +3917,9 @@ void loop()
         uint32_t avgUs = decodePacketsTimed
             ? (uint32_t)(decodeMicrosTotal / decodePacketsTimed)
             : 0;
+
+        Serial.printf("[STACK] loop free=%u bytes\n",
+                      (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
         Serial.printf(
             "[STATS] rx=%lu played=%lu frames=%lu drops=%lu queue=%u decode_avg=%luus decode_max=%luus realtime=%s peak=%lu clips=%lu\n",
