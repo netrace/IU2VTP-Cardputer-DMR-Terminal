@@ -7,13 +7,14 @@
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include "config.h"
+#include "tx_ambe_encoder.h"
 
 extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.1.0-alpha2";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha2";
+static constexpr const char* APP_VERSION = "1.1.0-alpha3";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha3";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -46,7 +47,7 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0-alpha2
+// IU2VTP Cardputer DMR Terminal v1.1.0-alpha3
 // Experimental PTT state machine.
 // Voice TX remains hard-blocked in this alpha.
 // ============================================================
@@ -108,6 +109,8 @@ static volatile uint32_t txPcmFramesConsumed = 0;
 static volatile uint32_t txPcmQueueDrops = 0;
 static volatile uint32_t txMicRecordFailures = 0;
 static volatile uint32_t txMicPeak = 0;
+static volatile uint32_t txAmbeFramesEncoded = 0;
+static volatile uint32_t txAmbeEncodeFailures = 0;
 
 static bool txCaptureActive()
 {
@@ -863,6 +866,10 @@ static void drawUi()
             line2 += String(txPcmQueue ? uxQueueMessagesWaiting(txPcmQueue) : 0);
             line2 += " d:";
             line2 += String(txPcmQueueDrops);
+            if (txAmbeEncoderAvailable()) {
+                line2 += " a:";
+                line2 += String(txAmbeFramesEncoded);
+            }
         } else if (ci.metadataValid && strlen(ci.name)) {
             line2 = ci.name;
         } else if (ci.metadataValid && strlen(ci.targetCall)) {
@@ -2482,6 +2489,19 @@ static bool startTxMicCapture()
     txPcmQueueDrops = 0;
     txMicRecordFailures = 0;
     txMicPeak = 0;
+    txAmbeFramesEncoded = 0;
+    txAmbeEncodeFailures = 0;
+
+    if (txAmbeEncoderAvailable()) {
+        if (!txAmbeEncoderBegin()) {
+            Serial.println("[PTT/AMBE] encoder begin failed");
+            return false;
+        }
+        txAmbeEncoderReset();
+    } else {
+        Serial.printf("[PTT/AMBE] embedded backend unavailable (%s)\n",
+                      txAmbeEncoderBackendName());
+    }
 
     M5Cardputer.Speaker.stop();
     M5Cardputer.Speaker.end();
@@ -2519,19 +2539,24 @@ static void stopTxMicCapture()
     M5Cardputer.Mic.end();
     M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
 
+    if (txAmbeEncoderAvailable())
+        txAmbeEncoderEnd();
+
     if (txPcmQueue)
         xQueueReset(txPcmQueue);
 
     M5Cardputer.Speaker.begin();
     applySpeakerVolume();
 
-    Serial.printf("[PTT/MIC] stopped frames=%lu queued=%lu consumed=%lu drops=%lu recfail=%lu peak=%lu\n",
+    Serial.printf("[PTT/MIC] stopped frames=%lu queued=%lu consumed=%lu drops=%lu recfail=%lu peak=%lu ambe=%lu encfail=%lu\n",
                   (unsigned long)txMicFramesCaptured,
                   (unsigned long)txPcmFramesQueued,
                   (unsigned long)txPcmFramesConsumed,
                   (unsigned long)txPcmQueueDrops,
                   (unsigned long)txMicRecordFailures,
-                  (unsigned long)txMicPeak);
+                  (unsigned long)txMicPeak,
+                  (unsigned long)txAmbeFramesEncoded,
+                  (unsigned long)txAmbeEncodeFailures);
 }
 
 static void processTxPcmDebug()
@@ -2541,6 +2566,17 @@ static void processTxPcmDebug()
     TxPcmFrame frame;
     while (xQueueReceive(txPcmQueue, &frame, 0) == pdTRUE) {
         ++txPcmFramesConsumed;
+
+        // Alpha3: exercise the stable PCM160 -> AMBE9 boundary if an embedded
+        // backend is available. The current ESP32 backend deliberately reports
+        // unavailable, so no voice bits are generated or transmitted yet.
+        if (txAmbeEncoderAvailable()) {
+            uint8_t ambe[TX_AMBE_FRAME_BYTES] = {0};
+            if (txAmbeEncodePcm160(frame.pcm, ambe))
+                ++txAmbeFramesEncoded;
+            else
+                ++txAmbeEncodeFailures;
+        }
     }
 }
 
@@ -3210,7 +3246,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha2");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha3");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / RX ONLY");
