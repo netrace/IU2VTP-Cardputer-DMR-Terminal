@@ -223,3 +223,16 @@ Our MIT `blip25-vocoder` backend instead emits canonical half-rate code-vector
 bits. The feature branch intentionally converts those canonical 72 bits through
 the proven DMR `rW/rX/rY/rZ` mapping before assembling the 27-byte Rewind
 audio payload. This is symmetric with the known-good RX deinterleave path.
+
+
+### 🚧 v1.1.0-alpha6 — Group / Private TX
+
+- Physical G0 / BtnA is the primary hold-to-talk control.
+- Keyboard P remains as a fallback/debug PTT.
+- Group TX uses session type 7 and the currently selected talkgroup.
+- Private TX uses session type 5 and a user-entered DMR ID.
+- C toggles GROUP / PRIVATE mode on the main screen.
+- I opens private DMR ID entry.
+- Private PTT is blocked until a valid destination DMR ID is set.
+- The Rewind framing host test validates both group and private SUPERHEADER layouts.
+- Live on-air validation remains required.
