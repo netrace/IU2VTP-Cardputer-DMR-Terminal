@@ -2925,6 +2925,62 @@ static void flushTxNetworkQueue(unsigned long maxWaitMs)
     }
 }
 
+static void drainTxPcmQueueToDmr()
+{
+    if (!txPcmQueue) return;
+
+    while (uxQueueMessagesWaiting(txPcmQueue) > 0 &&
+           WiFi.status() == WL_CONNECTED) {
+        // If the next PCM frame would complete a 27-byte packet, make sure
+        // there is room in the paced network queue before encoding it.
+        if (txDmrPacketQueue &&
+            txDmrFrameIndex == 2 &&
+            uxQueueSpacesAvailable(txDmrPacketQueue) == 0) {
+            processTxNetwork();
+            delay(1);
+            continue;
+        }
+
+        processTxPcmDebug();
+        processTxNetwork();
+    }
+}
+
+static void queueTrailingTxPartialPacket()
+{
+    if (txDmrFrameIndex == 0 || !txDmrPacketQueue)
+        return;
+
+    // Rewind audio is always 3 x 9-byte AMBE frames. Preserve the real final
+    // 1-2 microphone frames and pad only the missing tail with the known DMR
+    // silence frame so no captured speech is discarded.
+    while (txDmrFrameIndex < 3) {
+        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9,
+               TX_DMR_SILENCE_FRAME, 9);
+        ++txDmrFrameIndex;
+    }
+
+    memcpy(txLastDmrPayload, txDmrPacketBuild, sizeof(txLastDmrPayload));
+    ++txDmrPacketsBuilt;
+
+    TxDmrPacket pkt;
+    memcpy(pkt.payload, txLastDmrPayload, sizeof(pkt.payload));
+
+    const unsigned long start = millis();
+    while (uxQueueSpacesAvailable(txDmrPacketQueue) == 0 &&
+           millis() - start < 1500 &&
+           WiFi.status() == WL_CONNECTED) {
+        processTxNetwork();
+        delay(1);
+    }
+
+    if (xQueueSend(txDmrPacketQueue, &pkt, 0) != pdTRUE)
+        ++txNetworkPacketDrops;
+
+    txDmrFrameIndex = 0;
+    memset(txDmrPacketBuild, 0, sizeof(txDmrPacketBuild));
+}
+
 static void abortTxSession(const char* reason)
 {
     if (txState == TxState::IDLE) return;
@@ -3025,26 +3081,34 @@ static void endPttTest()
 
     const unsigned long elapsed = millis() - txStateStartedMs;
 
-    // Clear the active capture state BEFORE Mic.end(). A buffer-release callback
-    // may run while the driver is shutting down; it must never requeue capture.
+    // Stop capture first. The callback is detached before draining so no new
+    // microphone frames can enter the PCM queue during TX shutdown.
     txState = TxState::IDLE;
-
     M5Cardputer.Mic.end();
     M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
 
-    // Drain complete PCM frames already captured before the stop.
-    processTxPcmDebug();
-    flushTxNetworkQueue(1000);
+    // Send every complete microphone frame captured before PTT release.
+    drainTxPcmQueueToDmr();
 
-    // A trailing 1-2 AMBE frame partial packet is intentionally discarded
-    // rather than inventing an unverified silence codeword.
-    txDmrFrameIndex = 0;
+    // If 1-2 AMBE frames remain, keep them and pad only the missing tail.
+    queueTrailingTxPartialPacket();
+
+    // Drain the paced network queue before the terminator so no speech packet
+    // can leak into the next PTT session.
+    flushTxNetworkQueue(3000);
 
     if (txSessionAnnounced)
         sendTxTerminator();
 
     txSessionAnnounced = false;
     txStateStartedMs = 0;
+
+    // Hard reset all TX staging after the terminator. startTxMicCapture() also
+    // resets these at the next key-down, giving us protection on both edges.
+    if (txPcmQueue) xQueueReset(txPcmQueue);
+    if (txDmrPacketQueue) xQueueReset(txDmrPacketQueue);
+    txDmrFrameIndex = 0;
+    memset(txDmrPacketBuild, 0, sizeof(txDmrPacketBuild));
 
     stopTxMicCapture();
 
