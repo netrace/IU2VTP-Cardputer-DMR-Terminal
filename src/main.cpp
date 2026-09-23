@@ -147,7 +147,7 @@ static constexpr unsigned long TX_PACKET_PERIOD_US = 60000UL;
 // Diagnostic: send the well-known DMR AMBE+2 silence frame on REWIND TX.
 // This isolates protocol/session acceptance from blip25 bit ordering.
 // Set false after the Last Heard test.
-static constexpr bool TX_DIAGNOSTIC_STANDARD_SILENCE = true;
+static constexpr bool TX_DIAGNOSTIC_STANDARD_SILENCE = false;
 static constexpr uint8_t TX_DMR_SILENCE_FRAME[9] = {
     0xB9, 0xE8, 0x81, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00
 };
@@ -1340,6 +1340,27 @@ static bool sendRealtime(uint16_t type, const uint8_t* payload, uint16_t payload
                       type, (unsigned long)seq);
     }
     return ok;
+}
+
+static bool sendTxVoiceHeaders()
+{
+    uint8_t payload[REWIND_TX_VOICE_LC_LEN] = {0};
+    rewindTxBuildVoiceLc(payload,
+                         profileRadioId(),
+                         txDestinationId(),
+                         txCallMode == TxCallMode::PRIVATE);
+
+    // Z3DMR sends the Voice LC Header twice before voice frames.
+    for (int i = 0; i < 2; ++i) {
+        if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
+            return false;
+    }
+
+    Serial.printf("[PTT/TX] VOICE LC x2 mode=%s src=%lu dst=%lu\n",
+                  txCallModeLabel(),
+                  (unsigned long)profileRadioId(),
+                  (unsigned long)txDestinationId());
+    return true;
 }
 
 static bool sendTxSuperHeader()
@@ -2920,8 +2941,11 @@ static void beginPttTest()
     // It is reset only by startActiveConnection(), matching reference clients.
     txNextPacketDueUs = micros();
 
-    if (!sendTxSuperHeader()) {
-        abortTxSession("superheader failed");
+    // Match Z3DMR's working ODTP TX sequence: two DMR Voice LC
+    // headers (0x0911) open the call. SUPERHEADER (0x0928) is not used
+    // as the TX call opener.
+    if (!sendTxVoiceHeaders()) {
+        abortTxSession("voice header failed");
         setUiNotice("PTT TX start failed");
         return;
     }
