@@ -26,21 +26,21 @@ static int fail(const char* msg)
 static bool testVoiceLc()
 {
     uint8_t groupLc[REWIND_TX_VOICE_LC_LEN] = {0};
-    rewindTxBuildVoiceLc(groupLc, 2232489U, 222998U, false);
+    rewindTxBuildVoiceLc(groupLc, 1234567U, 7654321U, false);
 
     if (groupLc[0] != 0x00 || groupLc[1] != 0x00 || groupLc[2] != 0x00)
         return false;
-    if (groupLc[3] != 0x03 || groupLc[4] != 0x67 || groupLc[5] != 0x16)
+    if (groupLc[3] != 0x74 || groupLc[4] != 0xCB || groupLc[5] != 0xB1)
         return false;
-    if (groupLc[6] != 0x22 || groupLc[7] != 0x10 || groupLc[8] != 0xA9)
+    if (groupLc[6] != 0x12 || groupLc[7] != 0xD6 || groupLc[8] != 0x87)
         return false;
 
     uint8_t privateLc[REWIND_TX_VOICE_LC_LEN] = {0};
-    rewindTxBuildVoiceLc(privateLc, 2232489U, 2221234U, true);
+    rewindTxBuildVoiceLc(privateLc, 1234567U, 2345678U, true);
 
     if (privateLc[0] != 0x03)
         return false;
-    if (privateLc[3] != 0x21 || privateLc[4] != 0xE4 || privateLc[5] != 0xB2)
+    if (privateLc[3] != 0x23 || privateLc[4] != 0xCA || privateLc[5] != 0xCE)
         return false;
 
     // Parity bytes must be populated after RS(12,9) + Voice-LC 0x96 mask.
