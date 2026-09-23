@@ -8,13 +8,14 @@
 #include <Preferences.h>
 #include "config.h"
 #include "tx_ambe_encoder.h"
+#include "dmr_ambe_mapping.h"
 
 extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.1.0-alpha3";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha3";
+static constexpr const char* APP_VERSION = "1.1.0-alpha4";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha4";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -47,7 +48,7 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0-alpha3
+// IU2VTP Cardputer DMR Terminal v1.1.0-alpha4
 // Experimental PTT state machine.
 // Voice TX remains hard-blocked in this alpha.
 // ============================================================
@@ -111,6 +112,11 @@ static volatile uint32_t txMicRecordFailures = 0;
 static volatile uint32_t txMicPeak = 0;
 static volatile uint32_t txAmbeFramesEncoded = 0;
 static volatile uint32_t txAmbeEncodeFailures = 0;
+static volatile uint32_t txDmrFramesInterleaved = 0;
+static volatile uint32_t txDmrPacketsBuilt = 0;
+static uint8_t txDmrPacketBuild[27] = {0};
+static uint8_t txDmrFrameIndex = 0;
+static uint8_t txLastDmrPayload[27] = {0};
 
 static bool txCaptureActive()
 {
@@ -814,7 +820,7 @@ static void drawUi()
         // Speaker / callsign
         String speaker;
         if (txActive) {
-            speaker = "PTT MIC - TX DISABLED";
+            speaker = "PTT DMR BUILD - NO TX";
         } else if (ci.metadataValid) {
             if (strlen(ci.callsign)) speaker = ci.callsign;
             else if (ci.source) speaker = String(ci.source);
@@ -834,7 +840,7 @@ static void drawUi()
         // DMR ID: never show "DMR ID: 0"
         String idline;
         if (txActive) {
-            idline = "Mic capture 16k -> PCM 8k";
+            idline = "PCM -> AMBE -> DMR / no TX";
         } else if (ci.metadataValid && ci.source) {
             idline = "DMR ID: ";
             idline += String(ci.source);
@@ -869,6 +875,8 @@ static void drawUi()
             if (txAmbeEncoderAvailable()) {
                 line2 += " a:";
                 line2 += String(txAmbeFramesEncoded);
+                line2 += " p:";
+                line2 += String(txDmrPacketsBuilt);
             }
         } else if (ci.metadataValid && strlen(ci.name)) {
             line2 = ci.name;
@@ -1083,62 +1091,6 @@ void printAmbe49(const AmbeParams49 &p)
 
 
 
-static inline uint8_t dmrBitMSB(const uint8_t *frame9, int bitIndex)
-{
-    return (frame9[bitIndex >> 3] >> (7 - (bitIndex & 7))) & 1U;
-}
-
-// DMR AMBE interleave schedule (DSD / dmr_utils lineage).
-static const uint8_t DMR_rW[36] = {
-    0,1,0,1,0,1,
-    0,1,0,1,0,1,
-    0,1,0,1,0,1,
-    0,1,0,1,0,2,
-    0,2,0,2,0,2,
-    0,2,0,2,0,2
-};
-
-static const uint8_t DMR_rX[36] = {
-    23,10,22,9,21,8,
-    20,7,19,6,18,5,
-    17,4,16,3,15,2,
-    14,1,13,0,12,10,
-    11,9,10,8,9,7,
-    8,6,7,5,6,4
-};
-
-static const uint8_t DMR_rY[36] = {
-    0,2,0,2,0,2,
-    0,2,0,3,0,3,
-    1,3,1,3,1,3,
-    1,3,1,3,1,3,
-    1,3,1,3,1,3,
-    1,3,1,3,1,3
-};
-
-static const uint8_t DMR_rZ[36] = {
-    5,3,4,2,3,1,
-    2,0,1,13,0,12,
-    22,11,21,10,20,9,
-    19,8,18,7,17,6,
-    16,5,15,4,14,3,
-    13,2,12,1,11,0
-};
-
-static void dmr72ToMbelibFrame(const uint8_t *frame9, char ambe_fr[4][24])
-{
-    memset(ambe_fr, 0, 4 * 24 * sizeof(char));
-
-    int bitIndex = 0;
-    for (int i = 0; i < 36; ++i) {
-        const char bit1 = (char)dmrBitMSB(frame9, bitIndex++);
-        const char bit0 = (char)dmrBitMSB(frame9, bitIndex++);
-
-        ambe_fr[DMR_rW[i]][DMR_rX[i]] = bit1;
-        ambe_fr[DMR_rY[i]][DMR_rZ[i]] = bit0;
-    }
-}
-
 static void audioTask(void *param)
 {
     (void)param;
@@ -1190,7 +1142,7 @@ static void audioTask(void *param)
             memset(ambe_d, 0, sizeof(ambe_d));
 
             // Critical correction: DMR-specific deinterleave.
-            dmr72ToMbelibFrame(frame9, ambe_fr);
+            dmrInterleaved72ToMbelib(frame9, ambe_fr);
 
             int errs = 0;
             int errs2 = 0;
@@ -2491,6 +2443,11 @@ static bool startTxMicCapture()
     txMicPeak = 0;
     txAmbeFramesEncoded = 0;
     txAmbeEncodeFailures = 0;
+    txDmrFramesInterleaved = 0;
+    txDmrPacketsBuilt = 0;
+    txDmrFrameIndex = 0;
+    memset(txDmrPacketBuild, 0, sizeof(txDmrPacketBuild));
+    memset(txLastDmrPayload, 0, sizeof(txLastDmrPayload));
 
     if (txAmbeEncoderAvailable()) {
         if (!txAmbeEncoderBegin()) {
@@ -2548,7 +2505,7 @@ static void stopTxMicCapture()
     M5Cardputer.Speaker.begin();
     applySpeakerVolume();
 
-    Serial.printf("[PTT/MIC] stopped frames=%lu queued=%lu consumed=%lu drops=%lu recfail=%lu peak=%lu ambe=%lu encfail=%lu\n",
+    Serial.printf("[PTT/MIC] stopped frames=%lu queued=%lu consumed=%lu drops=%lu recfail=%lu peak=%lu ambe=%lu encfail=%lu dmrframes=%lu dmrpkts=%lu\n",
                   (unsigned long)txMicFramesCaptured,
                   (unsigned long)txPcmFramesQueued,
                   (unsigned long)txPcmFramesConsumed,
@@ -2556,7 +2513,9 @@ static void stopTxMicCapture()
                   (unsigned long)txMicRecordFailures,
                   (unsigned long)txMicPeak,
                   (unsigned long)txAmbeFramesEncoded,
-                  (unsigned long)txAmbeEncodeFailures);
+                  (unsigned long)txAmbeEncodeFailures,
+                  (unsigned long)txDmrFramesInterleaved,
+                  (unsigned long)txDmrPacketsBuilt);
 }
 
 static void processTxPcmDebug()
@@ -2567,15 +2526,36 @@ static void processTxPcmDebug()
     while (xQueueReceive(txPcmQueue, &frame, 0) == pdTRUE) {
         ++txPcmFramesConsumed;
 
-        // Alpha3: exercise the stable PCM160 -> AMBE9 boundary if an embedded
-        // backend is available. The current ESP32 backend deliberately reports
-        // unavailable, so no voice bits are generated or transmitted yet.
+        // Alpha4 ends at a fully assembled 27-byte DMR voice payload.
+        // It is deliberately kept in a debug sink and is NOT sent to ODTP.
         if (txAmbeEncoderAvailable()) {
-            uint8_t ambe[TX_AMBE_FRAME_BYTES] = {0};
-            if (txAmbeEncodePcm160(frame.pcm, ambe))
-                ++txAmbeFramesEncoded;
-            else
+            uint8_t canonical[TX_AMBE_FRAME_BYTES] = {0};
+
+            if (!txAmbeEncodePcm160(frame.pcm, canonical)) {
                 ++txAmbeEncodeFailures;
+                continue;
+            }
+
+            ++txAmbeFramesEncoded;
+
+            uint8_t dmr9[9] = {0};
+            dmrCanonical72ToInterleaved(canonical, dmr9);
+            ++txDmrFramesInterleaved;
+
+            memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
+            ++txDmrFrameIndex;
+
+            if (txDmrFrameIndex == 3) {
+                memcpy(txLastDmrPayload, txDmrPacketBuild, 27);
+                ++txDmrPacketsBuilt;
+                txDmrFrameIndex = 0;
+
+                // Print only the first complete packet for bench validation.
+                if (txDmrPacketsBuilt == 1) {
+                    Serial.print("[PTT/DMR] first 27-byte payload: ");
+                    printHex(txLastDmrPayload, 27);
+                }
+            }
         }
     }
 }
@@ -3246,10 +3226,16 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha3");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha4");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
-    Serial.println("classic mbelib / speaker 48 kHz / RX ONLY");
+    Serial.println("classic mbelib / speaker 48 kHz / TX experimental");
+
+    if (!dmrAmbeMappingSelfTest()) {
+        Serial.println("[STOP] DMR AMBE mapping self-test FAILED");
+        while (true) delay(1000);
+    }
+    Serial.println("[DMR MAP] canonical <-> interleaved self-test OK");
 
     loadSettings();
 
