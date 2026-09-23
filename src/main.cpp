@@ -144,9 +144,8 @@ static constexpr uint16_t REWIND_FLAG_REAL_TIME_1 = 0x0001;
 static constexpr unsigned long TX_MAX_MS = 180000UL;
 static constexpr unsigned long TX_PACKET_PERIOD_US = 60000UL;
 
-// Diagnostic: send the well-known DMR AMBE+2 silence frame on REWIND TX.
-// This isolates protocol/session acceptance from blip25 bit ordering.
-// Set false after the Last Heard test.
+// Optional diagnostic fallback: standard DMR AMBE+2 silence frame.
+// Keep disabled for normal live microphone TX.
 static constexpr bool TX_DIAGNOSTIC_STANDARD_SILENCE = false;
 static constexpr uint8_t TX_DMR_SILENCE_FRAME[9] = {
     0xB9, 0xE8, 0x81, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00
