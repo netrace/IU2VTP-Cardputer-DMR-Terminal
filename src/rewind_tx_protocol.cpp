@@ -38,14 +38,15 @@ void rewindTxBuildHeader(uint8_t out[REWIND_TX_HEADER_LEN],
     put16leLocal(out + 16, payloadLen);
 }
 
-void rewindTxBuildGroupSuperHeader(uint8_t out[REWIND_TX_SUPERHEADER_LEN],
-                                   uint32_t sourceId,
-                                   uint32_t targetId,
-                                   const char* sourceCallsign,
-                                   const char* targetCallsign)
+void rewindTxBuildSuperHeader(uint8_t out[REWIND_TX_SUPERHEADER_LEN],
+                              uint32_t sessionType,
+                              uint32_t sourceId,
+                              uint32_t targetId,
+                              const char* sourceCallsign,
+                              const char* targetCallsign)
 {
     memset(out, 0, REWIND_TX_SUPERHEADER_LEN);
-    put32leLocal(out + 0, 7); // GroupVoice
+    put32leLocal(out + 0, sessionType);
     put32leLocal(out + 4, sourceId);
     put32leLocal(out + 8, targetId);
     copyCall10(out + 12, sourceCallsign);
