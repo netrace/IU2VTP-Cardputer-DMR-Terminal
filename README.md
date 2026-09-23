@@ -218,10 +218,10 @@ The central rule is now: **preserve the verified RX and TX protocol/audio paths 
 ## Current release
 
 ```text
-v1.1.0
+v1.1.1
 ```
 
-v1.1.0 adds live ODTP PTT transmission, group/private TX modes, physical G0 PTT, embedded AMBE+2 encode, verified Voice-LC call setup, pacing, half-duplex audio handling and TX failure/timeout handling.
+v1.1.1 is a maintenance release that drains all pending TX audio on PTT release, prevents stale buffered speech from leaking into the next transmission, pads only the final incomplete 27-byte DMR packet with silence, and blocks PTT while RX traffic is active. It includes all v1.1.0 live ODTP RX/TX features.
 
 ## Status
 
