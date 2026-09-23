@@ -25,6 +25,7 @@ static int fail(const char* msg)
 
 int main()
 {
+    if (!testVoiceLc()) return 10;
     uint8_t h[18];
     rewindTxBuildHeader(h, 0x0928, 0x0001, 0x11223344, 32);
 
@@ -63,4 +64,23 @@ int main()
 
     std::puts("Rewind TX framing OK");
     return 0;
+}
+
+
+static bool testVoiceLc()
+{
+    uint8_t lc[REWIND_TX_VOICE_LC_LEN] = {0};
+    rewindTxBuildVoiceLc(lc, 0x2F9BE5U, 0x000C30U, false);
+
+    // Core LC fields: group FLCO/FID/options, dst24, src24.
+    if (lc[0] != 0x00 || lc[1] != 0x00 || lc[2] != 0x00)
+        return false;
+    if (lc[3] != 0x00 || lc[4] != 0x0C || lc[5] != 0x30)
+        return false;
+    if (lc[6] != 0x2F || lc[7] != 0x9B || lc[8] != 0xE5)
+        return false;
+
+    uint8_t privateLc[REWIND_TX_VOICE_LC_LEN] = {0};
+    rewindTxBuildVoiceLc(privateLc, 2232489U, 2221234U, true);
+    return privateLc[0] == 0x03;
 }
