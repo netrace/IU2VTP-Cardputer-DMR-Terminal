@@ -12,6 +12,7 @@ on:
       - "platformio.ini"
       - "tools/ambe_ref/**"
       - "tools/dmr_mapping_test.cpp"
+      - "tools/rewind_tx_test.cpp"
       - "codec/blip25_ffi/**"
       - ".github/workflows/build-ptt-feature.yml"
   workflow_dispatch:
@@ -40,6 +41,13 @@ jobs:
             tools/dmr_mapping_test.cpp src/dmr_ambe_mapping.cpp \
             -o /tmp/dmr_mapping_test
           /tmp/dmr_mapping_test
+
+      - name: Rewind TX framing host test
+        run: |
+          g++ -std=c++17 -Iinclude \
+            tools/rewind_tx_test.cpp src/rewind_tx_protocol.cpp \
+            -o /tmp/rewind_tx_test
+          /tmp/rewind_tx_test
 
       - name: AMBE+2 host reference round-trip
         run: cargo run --release --manifest-path tools/ambe_ref/Cargo.toml
