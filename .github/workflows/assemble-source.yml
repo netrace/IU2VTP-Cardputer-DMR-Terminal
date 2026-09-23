@@ -1,0 +1,62 @@
+name: Assemble v1.0.3 source
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -d .upload_parts ]; then
+            echo "No staged source parts found; nothing to do."
+            exit 0
+          fi
+
+          mkdir -p src
+          cat .upload_parts/part* > src/main.cpp
+
+          expected_size=92217
+          actual_size="$(wc -c < src/main.cpp | tr -d ' ')"
+          if [ "$actual_size" != "$expected_size" ]; then
+            echo "Size mismatch: expected $expected_size, got $actual_size"
+            exit 1
+          fi
+
+          expected_sha="8f7851d9af7ffdc3e6ed1786f8ebb2f54e8c44e1dd2d91606fb92c347d67fd1e"
+          actual_sha="$(sha256sum src/main.cpp | awk '{print $1}')"
+          if [ "$actual_sha" != "$expected_sha" ]; then
+            echo "SHA-256 mismatch"
+            echo "expected: $expected_sha"
+            echo "actual:   $actual_sha"
+            exit 1
+          fi
+
+          rm -rf .upload_parts
+
+      - name: Commit assembled source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "Add v1.0.3 firmware source"
+          git push
