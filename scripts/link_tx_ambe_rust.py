@@ -184,7 +184,7 @@ def build_archive(cargo, export_file):
     # user's login-shell configuration.
     build_cmd = (
         f'. "{export_file}" && '
-        f'"{cargo}" build -Zbuild-std=std,panic_abort '
+        f'"{cargo}" +esp build -Zbuild-std=std,panic_abort '
         f'--release --target xtensa-esp32s3-espidf '
         f'--manifest-path "{manifest}"'
     )
