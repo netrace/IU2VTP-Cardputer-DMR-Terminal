@@ -107,16 +107,16 @@ jobs:
           IU2VTP_AMBE_RUST_LIB: ${{ github.workspace }}/rustlib/libiu2vtp_blip25_ffi.a
         run: pio run -e m5stack-stamps3
 
-      - name: Prepare alpha5 firmware asset
+      - name: Prepare alpha6 firmware asset
         run: |
-          cp .pio/build/m5stack-stamps3/firmware.bin              IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha5_PTT.bin
-          sha256sum IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha5_PTT.bin             > IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha5_PTT.bin.sha256
+          cp .pio/build/m5stack-stamps3/firmware.bin              IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin
+          sha256sum IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin             > IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin.sha256
 
       - name: Upload experimental firmware
         uses: actions/upload-artifact@v4
         with:
-          name: cardputer-alpha5-live-ptt
+          name: cardputer-alpha6-group-private-ptt
           path: |
-            IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha5_PTT.bin
-            IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha5_PTT.bin.sha256
+            IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin
+            IU2VTP_Cardputer_DMR_Terminal_v1.1.0-alpha6_PTT.bin.sha256
           if-no-files-found: error
