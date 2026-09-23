@@ -1361,10 +1361,14 @@ static bool sendTxVoiceHeaders()
                          txDestinationId(),
                          txCallMode == TxCallMode::PRIVATE);
 
+    // Z3DMR's ODTP transmitter sends the Voice LC Header twice before the
+    // first 0x0920 audio packet. Match that sequence exactly.
+    if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
+        return false;
     if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
         return false;
 
-    Serial.printf("[PTT/TX] VOICE LC mode=%s src=%lu dst=%lu payload=",
+    Serial.printf("[PTT/TX] VOICE LC x2 mode=%s src=%lu dst=%lu payload=",
                   txCallModeLabel(),
                   (unsigned long)profileRadioId(),
                   (unsigned long)txDestinationId());
