@@ -1,0 +1,8 @@
+[package]
+name = "iu2vtp-ambe-reference"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+blip25-vocoder = { version = "1.0.0", default-features = false, features = ["encode", "decode"] }
