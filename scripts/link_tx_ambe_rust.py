@@ -3,6 +3,8 @@ Import("env")
 import os
 import shutil
 import subprocess
+import platform
+import urllib.request
 from pathlib import Path
 
 project_dir = Path(env.subst("$PROJECT_DIR")).resolve()
@@ -106,18 +108,46 @@ def ensure_espup(cargo):
             espup = str(local_espup)
 
     if not espup:
-        print("[AMBE] espup not found; installing automatically...")
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        # Prefer official prebuilt espup binaries. Compiling espup itself with
+        # cargo is unnecessary and can fail because of host-Rust dependency
+        # compatibility before we even reach the ESP toolchain.
+        asset = None
+        if system == "darwin":
+            if machine in ("arm64", "aarch64"):
+                asset = "espup-aarch64-apple-darwin"
+            elif machine in ("x86_64", "amd64"):
+                asset = "espup-x86_64-apple-darwin"
+        elif system == "linux":
+            if machine in ("arm64", "aarch64"):
+                asset = "espup-aarch64-unknown-linux-gnu"
+            elif machine in ("x86_64", "amd64"):
+                asset = "espup-x86_64-unknown-linux-gnu"
+
+        if not asset:
+            print(f"[AMBE] no prebuilt espup mapping for {system}/{machine}")
+            env.Exit(1)
+
+        version = "v0.17.1"
+        url = f"https://github.com/esp-rs/espup/releases/download/{version}/{asset}"
+        local_espup = cargo_bin / "espup"
+        cargo_bin.mkdir(parents=True, exist_ok=True)
+
+        print(f"[AMBE] espup not found; downloading official prebuilt {version}...")
+        print(f"[AMBE] {url}")
         try:
-            run([cargo, "install", "espup", "--locked"])
-        except subprocess.CalledProcessError as exc:
-            print(f"[AMBE] espup install failed ({exc.returncode})")
-            env.Exit(exc.returncode)
-        espup = str(cargo_bin / "espup")
+            urllib.request.urlretrieve(url, local_espup)
+            local_espup.chmod(0o755)
+        except Exception as exc:
+            print(f"[AMBE] espup binary download failed: {exc}")
+            env.Exit(1)
+
+        espup = str(local_espup)
 
     export_file = home / "export-esp.sh"
 
-    # espup install is only needed for a fresh machine. Once export-esp.sh
-    # exists we reuse the installed Xtensa toolchain.
     if not export_file.is_file():
         print("[AMBE] ESP Xtensa Rust toolchain missing; installing automatically...")
         try:
@@ -131,7 +161,6 @@ def ensure_espup(cargo):
         env.Exit(1)
 
     return export_file
-
 
 def build_archive(cargo, export_file):
     # espup writes shell exports (PATH, LIBCLANG_PATH, etc.). Use a shell only
