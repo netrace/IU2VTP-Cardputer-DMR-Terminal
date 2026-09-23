@@ -4,7 +4,8 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
+    paths:
+      - '.upload_b64/READY'
 
 permissions:
   contents: write
@@ -16,47 +17,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Assemble source
+      - name: Decode exact source
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ ! -d .upload_parts ]; then
-            echo "No staged source parts found; nothing to do."
-            exit 0
-          fi
-
           mkdir -p src
-          cat .upload_parts/part* > src/main.cpp
+          cat .upload_b64/part* | base64 -d > src/main.cpp
 
           expected_size=92217
           actual_size="$(wc -c < src/main.cpp | tr -d ' ')"
-          if [ "$actual_size" != "$expected_size" ]; then
-            echo "Size mismatch: expected $expected_size, got $actual_size"
-            exit 1
-          fi
+          test "$actual_size" = "$expected_size"
 
           expected_sha="8f7851d9af7ffdc3e6ed1786f8ebb2f54e8c44e1dd2d91606fb92c347d67fd1e"
           actual_sha="$(sha256sum src/main.cpp | awk '{print $1}')"
-          if [ "$actual_sha" != "$expected_sha" ]; then
-            echo "SHA-256 mismatch"
-            echo "expected: $expected_sha"
-            echo "actual:   $actual_sha"
-            exit 1
-          fi
+          test "$actual_sha" = "$expected_sha"
 
-          rm -rf .upload_parts
+          rm -rf .upload_parts .upload_b64
+          rm -f .github/workflows/assemble-source.yml
 
-      - name: Commit assembled source
+      - name: Commit exact v1.0.3 source
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
-            exit 0
-          fi
-          git commit -m "Add v1.0.3 firmware source"
+          git commit -m "Add exact v1.0.3 firmware source"
           git push
