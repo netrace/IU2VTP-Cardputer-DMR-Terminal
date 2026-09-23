@@ -1,3 +1,7 @@
+# feature/ptt-tx branch override
+
+On `feature/ptt-tx`, implement PTT/TX only as a separate experimental subsystem. Do not modify the known-good RX deinterleave/mbelib path. Early alphas must keep actual DMR voice TX blocked.
+
 # GitHub Copilot Instructions
 
 You are working on **IU2VTP Cardputer DMR Terminal**, a receive-only DMR-over-IP client for M5Stack Cardputer.
