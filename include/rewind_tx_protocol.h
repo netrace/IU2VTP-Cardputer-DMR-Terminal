@@ -5,6 +5,7 @@
 
 static constexpr size_t REWIND_TX_HEADER_LEN = 18;
 static constexpr size_t REWIND_TX_SUPERHEADER_LEN = 32;
+static constexpr size_t REWIND_TX_VOICE_LC_LEN = 12;
 
 void rewindTxBuildHeader(uint8_t out[REWIND_TX_HEADER_LEN],
                          uint16_t type,
@@ -28,3 +29,8 @@ inline void rewindTxBuildGroupSuperHeader(uint8_t out[REWIND_TX_SUPERHEADER_LEN]
     rewindTxBuildSuperHeader(out, 7, sourceId, targetId,
                              sourceCallsign, targetCallsign);
 }
+
+void rewindTxBuildVoiceLc(uint8_t out[REWIND_TX_VOICE_LC_LEN],
+                          uint32_t sourceId,
+                          uint32_t targetId,
+                          bool privateCall);
