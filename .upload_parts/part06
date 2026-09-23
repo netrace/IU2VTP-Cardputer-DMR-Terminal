@@ -1,0 +1,363 @@
+sid[0] != 0;
+}
+
+static void startWifiScan()
+{
+    wifiScanning = true;
+    wifiScanCount = 0;
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false, false);
+    delay(100);
+
+    int n = WiFi.scanNetworks(false, true);
+    if (n < 0) n = 0;
+
+    int lim = min(n, (int)MAX_WIFI_SCAN);
+    for (int i = 0; i < lim; ++i) {
+        String ssid = WiFi.SSID(i);
+        if (!ssid.length()) continue;
+
+        bool duplicate = false;
+        for (int j = 0; j < wifiScanCount; ++j) {
+            if (wifiScan[j].ssid == ssid) {
+                duplicate = true;
+                if (WiFi.RSSI(i) > wifiScan[j].rssi) {
+                    wifiScan[j].rssi = WiFi.RSSI(i);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+                    wifiScan[j].open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+#else
+                    wifiScan[j].open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+#endif
+                }
+                break;
+            }
+        }
+
+        if (!duplicate && wifiScanCount < MAX_WIFI_SCAN) {
+            wifiScan[wifiScanCount].ssid = ssid;
+            wifiScan[wifiScanCount].rssi = WiFi.RSSI(i);
+            wifiScan[wifiScanCount].open =
+                (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+            wifiScanCount++;
+        }
+    }
+
+    WiFi.scanDelete();
+
+    // Sort strongest first.
+    for (int i = 0; i < wifiScanCount; ++i) {
+        for (int j = i + 1; j < wifiScanCount; ++j) {
+            if (wifiScan[j].rssi > wifiScan[i].rssi) {
+                WifiScanEntry tmp = wifiScan[i];
+                wifiScan[i] = wifiScan[j];
+                wifiScan[j] = tmp;
+            }
+        }
+    }
+
+    wifiMenuIndex = 0;
+    wifiScanning = false;
+}
+
+static bool connectSavedWifi(uint32_t timeoutMs)
+{
+    if (!wifiConfigured()) return false;
+
+    Serial.printf("[WIFI] Connection a \"%s\"...\n", wifiConfig.ssid);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifiConfig.ssid, wifiConfig.password);
+
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+        delay(150);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[WIFI] OK IP=%s RSSI=%d\n",
+                      WiFi.localIP().toString().c_str(),
+                      WiFi.RSSI());
+        return true;
+    }
+
+    Serial.println("[WIFI] Connection fallita");
+    return false;
+}
+
+static void configureSelectedWifi()
+{
+    if (wifiMenuIndex >= wifiScanCount) return;
+
+    String ssid = wifiScan[wifiMenuIndex].ssid;
+    snprintf(wifiConfig.ssid, sizeof(wifiConfig.ssid), "%s", ssid.c_str());
+
+    if (wifiScan[wifiMenuIndex].open) {
+        wifiConfig.password[0] = 0;
+        saveWifiConfig();
+
+        clearUiScreen();
+        M5Cardputer.Display.setTextColor(TFT_WHITE);
+        M5Cardputer.Display.setCursor(8, 40);
+        M5Cardputer.Display.print("Connecting...");
+
+        bool ok = connectSavedWifi(15000);
+        delay(500);
+
+        if (ok) {
+            setupFlowActive = true;
+            routeAfterWifiConnected();
+        } else {
+            uiMode = UiMode::WIFI_HOME;
+            wifiHomeDirty = true;
+            drawWifiHome();
+        }
+        return;
+    }
+
+    uiMode = UiMode::TEXT_INPUT;
+    inputTitle = "Wi-Fi password";
+    inputBuffer = "";
+    inputNumericOnly = false;
+    inputSecret = true;
+    inputTarget = 4000;
+    drawInputBox();
+}
+
+static bool connectWiFi()
+{
+    if (!wifiConfigured()) {
+        Serial.println("[WIFI] No network configured");
+        return false;
+    }
+
+    if (!connectSavedWifi(15000)) {
+        Serial.println("[WIFI] Saved Wi-Fi connection failed");
+        return false;
+    }
+
+    return true;
+}
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(1500);
+
+    Serial.println();
+    Serial.println("============================================");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.0.3");
+    Serial.println(" classic mbelib + Cardputer speaker");
+    Serial.println("============================================");
+    Serial.println("classic mbelib / speaker 48 kHz / RX ONLY");
+
+    loadSettings();
+
+    Serial.printf("[BOOT] free heap=%u\n", (unsigned)ESP.getFreeHeap());
+
+    // Cardputer + speaker
+    auto m5cfg = M5.config();
+    M5Cardputer.begin(m5cfg);
+
+    M5Cardputer.Display.setRotation(1);
+    M5Cardputer.Display.setTextWrap(false);
+
+
+    // Initialize Wi-Fi/lwIP even before an SSID exists.
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+
+    callInfoMutex = xSemaphoreCreateMutex();
+    if (!callInfoMutex) {
+        Serial.println("[STOP] callInfoMutex fallita");
+        while (true) delay(1000);
+    }
+
+    if (!M5Cardputer.Speaker.begin()) {
+        Serial.println("[STOP] Speaker.begin() fallita");
+        while (true) delay(1000);
+    }
+
+    applySpeakerVolume();
+
+    audioQueue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(AudioPacket));
+    if (!audioQueue) {
+        Serial.println("[STOP] audioQueue fallita");
+        while (true) delay(1000);
+    }
+
+    BaseType_t taskOk = xTaskCreatePinnedToCore(
+        audioTask,
+        "dmr_audio",
+        8192,
+        nullptr,
+        2,
+        &audioTaskHandle,
+        1
+    );
+
+    if (taskOk != pdPASS) {
+        Serial.println("[STOP] audioTask fallita");
+        while (true) delay(1000);
+    }
+
+    BaseType_t lookupOk = xTaskCreatePinnedToCore(
+        callsignLookupTask,
+        "dmr_lookup",
+        6144,
+        nullptr,
+        1,
+        &lookupTaskHandle,
+        0
+    );
+
+    if (lookupOk != pdPASS) {
+        Serial.println("[WARN] callsign lookup task not started");
+    }
+
+    Serial.println("[BOOT] speaker, display and audio task OK");
+
+    const bool wifiOk = connectWiFi();
+
+    // IMPORTANT: choose and draw exactly ONE initial screen.
+    // Network helpers above never draw anything.
+    normalizeActiveProfile();
+
+    if (wifiOk && activeProfileReady()) {
+        setupFlowActive = false;
+        Serial.printf("[BOOT] Active profile: %s (%s), TG %lu\n",
+                      profileName(), profileHost(), (unsigned long)activeTG);
+        resetNavigation(UiMode::MAIN);
+    } else if (wifiOk) {
+        Serial.println("[SETUP] Wi-Fi OK. Select/configure the DMR server.");
+        setupFlowActive = true;
+        enterProfileStep(true);
+    } else {
+        Serial.println("[SETUP] 1/3 Configure Wi-Fi.");
+        setupFlowActive = true;
+        resetNavigation(UiMode::WIFI_HOME);
+    }
+}
+
+void loop()
+{
+    M5Cardputer.update();
+
+    // Never reboot merely because Wi-Fi is disconnected.
+    // During first-time setup this is expected, and rebooting here creates
+    // an endless flashing/reboot loop on the Wi-Fi configuration screen.
+    if (WiFi.status() != WL_CONNECTED) {
+        // If we had a working connection before, retry gently in background,
+        // but never while scanning or entering Wi-Fi credentials.
+        bool wifiUiBusy =
+            uiMode == UiMode::WIFI_HOME ||
+            uiMode == UiMode::WIFI_SCAN ||
+            uiMode == UiMode::WIFI_PASSWORD ||
+            (uiMode == UiMode::TEXT_INPUT && inputTarget == 4000);
+
+        if (wifiEverConnected && wifiConfigured() && !wifiUiBusy &&
+            millis() - lastWifiReconnectAttempt >= 10000) {
+            lastWifiReconnectAttempt = millis();
+            Serial.println("[WIFI] Connection persa: tentativo riconnection");
+            WiFi.reconnect();
+        }
+    } else {
+        wifiEverConnected = true;
+    }
+
+    static bool prevWifiConnected = false;
+    const bool wifiConnectedNow = (WiFi.status() == WL_CONNECTED);
+
+    if (!wifiConnectedNow && prevWifiConnected) {
+        if (udpStarted) {
+            udp.stop();
+            udpStarted = false;
+            Serial.println("[UDP] closed after Wi-Fi loss");
+        }
+    }
+
+    if (wifiConnectedNow && !prevWifiConnected) {
+        Serial.println("[WIFI] Connected: transport available");
+        if (activeProfileReady()) {
+            startActiveConnection();
+        }
+    }
+
+    prevWifiConnected = wifiConnectedNow;
+
+    int packetSize = (WiFi.status() == WL_CONNECTED && udpStarted) ? udp.parsePacket() : 0;
+
+    if (packetSize > 0) {
+        static uint8_t rx[512];
+        int n = udp.read(rx, min(packetSize, (int)sizeof(rx)));
+
+        if (n > 0) {
+            handlePacket(rx, (size_t)n);
+        }
+    }
+
+    unsigned long now = millis();
+
+    // Fallback: if a terminator is missed, clear RX state after 1.5 s without voice.
+    if (lastVoicePacketMs && now - lastVoicePacketMs > 1500) {
+        if (callInfoMutex && xSemaphoreTake(callInfoMutex, 0) == pdTRUE) {
+            if (callInfo.active) {
+                callInfo.active = false;
+                callInfo.endMs = now;
+            }
+            xSemaphoreGive(callInfoMutex);
+        }
+    }
+
+    handleKeyboard();
+    if (uiMode == UiMode::MAIN) {
+        drawUi();
+    }
+
+    if (WiFi.status() == WL_CONNECTED &&
+        activeProfileReady() &&
+        (state == State::AUTHENTICATED ||
+         state == State::WAIT_SUB_ACK ||
+         state == State::SUBSCRIBED) &&
+        now - lastKeepaliveTx >= 5000) {
+
+        sendKeepalive();
+    }
+
+    if (WiFi.status() == WL_CONNECTED &&
+        activeProfileReady() &&
+        state == State::WAIT_CHALLENGE &&
+        now - lastKeepaliveTx >= 20000) {
+
+        sendKeepalive();
+    }
+
+    if (state == State::WAIT_SUB_ACK &&
+        now - lastSubscribeTx >= 1500) {
+
+        sendSubscription();
+    }
+
+    static unsigned long lastStats = 0;
+    if (now - lastStats >= 10000) {
+        lastStats = now;
+        uint32_t avgUs = decodePacketsTimed
+            ? (uint32_t)(decodeMicrosTotal / decodePacketsTimed)
+            : 0;
+
+        Serial.printf(
+            "[STATS] rx=%lu played=%lu frames=%lu drops=%lu queue=%u decode_avg=%luus decode_max=%luus realtime=%s peak=%lu clips=%lu\n",
+            (unsigned long)audioPackets,
+            (unsigned long)audioPacketsPlayed,
+            (unsigned long)audioFramesDecoded,
+            (unsigned long)audioQueueDrops,
+            audioQueue ? (unsigned)uxQueueMessagesWaiting(audioQueue) : 0,
+            (unsigned long)avgUs,
+            (unsigned long)decodeMicrosMax,
+            (avgUs > 0 && avgUs < 60000) ? "YES" : "NO",
+            (unsigned long)pcmPeakSeen,
+            (unsigned long)pcmClipSamples
+        );
+    }
+
+    delay(1);
+}
