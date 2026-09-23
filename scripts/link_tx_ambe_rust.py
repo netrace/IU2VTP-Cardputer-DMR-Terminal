@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 import platform
-import urllib.request
 from pathlib import Path
 
 project_dir = Path(env.subst("$PROJECT_DIR")).resolve()
@@ -137,12 +136,29 @@ def ensure_espup(cargo):
 
         print(f"[AMBE] espup not found; downloading official prebuilt {version}...")
         print(f"[AMBE] {url}")
-        try:
-            urllib.request.urlretrieve(url, local_espup)
-            local_espup.chmod(0o755)
-        except Exception as exc:
-            print(f"[AMBE] espup binary download failed: {exc}")
+
+        curl = shutil.which("curl")
+        if not curl:
+            print("[AMBE] curl not found; cannot download espup")
             env.Exit(1)
+
+        try:
+            subprocess.run(
+                [
+                    curl,
+                    "-fL",
+                    "--retry", "3",
+                    "--connect-timeout", "20",
+                    "-o", str(local_espup),
+                    url,
+                ],
+                cwd=project_dir,
+                check=True,
+            )
+            local_espup.chmod(0o755)
+        except subprocess.CalledProcessError as exc:
+            print(f"[AMBE] espup binary download failed ({exc.returncode})")
+            env.Exit(exc.returncode)
 
         espup = str(local_espup)
 
