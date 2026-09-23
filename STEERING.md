@@ -1,3 +1,7 @@
+# feature/ptt-tx override
+
+Experimental PTT/TX development is allowed on this branch. Keep RX untouched, keep TX isolated, and do not enable live DMR voice transmission until framing, encoder licensing, pacing, headers and terminators are verified.
+
 # AI Steering Notes
 
 Read `AGENTS.md` before making changes.
