@@ -11,6 +11,7 @@ on:
       - "scripts/**"
       - "platformio.ini"
       - "tools/ambe_ref/**"
+      - "codec/blip25_ffi/**"
       - ".github/workflows/build-ptt-feature.yml"
   workflow_dispatch:
 
@@ -34,3 +35,6 @@ jobs:
 
       - name: AMBE+2 host reference round-trip
         run: cargo run --release --manifest-path tools/ambe_ref/Cargo.toml
+
+      - name: AMBE Rust C-ABI backend tests
+        run: cargo test --release --manifest-path codec/blip25_ffi/Cargo.toml
