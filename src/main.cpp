@@ -2767,12 +2767,16 @@ static void processTxPcmDebug()
 
         ++txAmbeFramesEncoded;
 
-        // Open DMR Terminal / REWIND type 0x0920 carries three bare
-        // 9-byte AMBE "mode 33" frames. Do NOT apply the RF/DMR
-        // rW/rX/rY/rZ interleave used by the over-the-air decoder path.
-        ++txDmrFramesInterleaved; // retained as TX-frame counter for now
+        // REWIND 0x0920 carries three 9-byte DMR AMBE frames. blip25
+        // returns the carrier-neutral c0..c3 code vectors serialized in
+        // canonical order, so apply the DMR 72-bit rW/rX/rY/rZ interleave
+        // for each individual 9-byte frame. We still do NOT build a 33-byte
+        // RF burst here; REWIND transports the three frame9 values directly.
+        uint8_t dmr9[9] = {0};
+        dmrCanonical72ToInterleaved(canonical, dmr9);
+        ++txDmrFramesInterleaved;
 
-        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, canonical, 9);
+        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
         ++txDmrFrameIndex;
 
         if (txDmrFrameIndex == 3) {
@@ -2788,7 +2792,7 @@ static void processTxPcmDebug()
             }
 
             if (txDmrPacketsBuilt == 1) {
-                Serial.print("[PTT/AMBE] first mode33 27-byte payload: ");
+                Serial.print("[PTT/AMBE] first DMR-interleaved mode33 payload: ");
                 printHex(txLastDmrPayload, 27);
             }
         }
@@ -2899,7 +2903,8 @@ static void beginPttTest()
     // Drop queued RX voice and enter explicit half-duplex mode.
     if (audioQueue) xQueueReset(audioQueue);
 
-    realtimeSeqNo = 0;
+    // Keep realtimeSeqNo monotonic for the whole REWIND connection.
+    // It is reset only by startActiveConnection(), matching reference clients.
     txNextPacketDueUs = micros();
 
     if (!sendTxSuperHeader()) {
