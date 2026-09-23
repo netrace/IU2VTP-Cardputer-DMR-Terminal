@@ -65,19 +65,21 @@ Implemented:
 - speaker restored on PTT release;
 - still no DMR voice TX.
 
-### v1.1.0-alpha3 — AMBE encode validation
+### 🚧 v1.1.0-alpha3 — AMBE encode validation
 
-Introduce an encoder behind a narrow interface:
+Current alpha3 work:
 
-```cpp
-bool encodeAmbeFrame(const int16_t pcm160[160], uint8_t ambe9[9]);
-```
+- stable embedded interface: 160 PCM samples at 8 kHz -> 9 AMBE bytes;
+- ESP32 backend deliberately reports unavailable for now;
+- host reference tool uses MIT-licensed `blip25-vocoder`;
+- host CI verifies PCM -> half-rate AMBE+2 code vectors -> FEC decode -> PCM;
+- no network voice TX.
 
-Validate locally by decoding generated AMBE frames through the known-good RX
-decoder before any network transmission.
+The earlier OpenDMR/OP25 candidate is GPL and is therefore not being vendored
+into this MIT project.
 
-Licensing of the selected encoder implementation must be resolved before it is
-incorporated into the MIT-licensed repository.
+The next alpha3 step is a Rust/FFI ESP32-S3 backend using the MIT reference
+implementation, with the upstream patent notice retained and documented.
 
 ### v1.1.0-alpha4 — DMR framing
 
