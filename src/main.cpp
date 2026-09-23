@@ -19,8 +19,8 @@ extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.1.0-alpha6";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha6";
+static constexpr const char* APP_VERSION = "1.1.0";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -53,9 +53,9 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0-alpha6
-// Experimental PTT/TX branch.
-// Alpha5 enables live group-voice TX only while P is held.
+// IU2VTP Cardputer DMR Terminal v1.1.0
+// Verified RX/TX Rewind / Open DMR Terminal implementation.
+// G0 / BtnA is the primary hold-to-talk control; P is a keyboard fallback.
 // ============================================================
 
 static constexpr char REWIND_SIGN[] = "REWIND01";
@@ -92,7 +92,7 @@ enum class State {
     SUBSCRIBED
 };
 
-// Experimental TX/PTT state. Alpha1 deliberately does not send DMR voice.
+// TX/PTT state.
 enum class TxState {
     IDLE,
     PTT_HELD_CAPTURE
