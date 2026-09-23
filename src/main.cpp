@@ -14,8 +14,8 @@ extern "C" {
 #include <mbelib.h>
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
-static constexpr const char* APP_VERSION = "1.1.0-alpha4";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha4";
+static constexpr const char* APP_VERSION = "1.1.0-alpha5";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha5";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -48,9 +48,9 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0-alpha4
-// Experimental PTT state machine.
-// Voice TX remains hard-blocked in this alpha.
+// IU2VTP Cardputer DMR Terminal v1.1.0-alpha5
+// Experimental PTT/TX branch.
+// Alpha5 enables live group-voice TX only while P is held.
 // ============================================================
 
 static constexpr char REWIND_SIGN[] = "REWIND01";
@@ -63,6 +63,7 @@ enum PacketType : uint16_t {
     PKT_AUTHENTICATION  = 0x0003,
     PKT_REDIRECTION     = 0x0008,
     PKT_REPORT          = 0x0100,
+    PKT_BUSY_NOTICE     = 0x0200,
     PKT_SUBSCRIPTION    = 0x0901,
     PKT_CANCELLING      = 0x0902,
     PKT_DMR_HEADER_FLC  = 0x0911,
@@ -130,6 +131,22 @@ IPAddress bmIP;
 State state = State::WAIT_CHALLENGE;
 
 uint32_t seqNo = 0;
+uint32_t realtimeSeqNo = 0;
+
+static constexpr uint16_t REWIND_FLAG_REAL_TIME_1 = 0x0001;
+static constexpr unsigned long TX_MAX_MS = 180000UL;
+static constexpr unsigned long TX_PACKET_PERIOD_US = 60000UL;
+
+struct TxDmrPacket {
+    uint8_t payload[27];
+};
+
+static QueueHandle_t txDmrPacketQueue = nullptr;
+static volatile uint32_t txNetworkPacketsSent = 0;
+static volatile uint32_t txNetworkPacketDrops = 0;
+static volatile uint32_t txNetworkErrors = 0;
+static uint32_t txNextPacketDueUs = 0;
+static bool txSessionAnnounced = false;
 
 // ============================================================
 // Persistent runtime configuration
@@ -791,7 +808,7 @@ static void drawUi()
     if (!haveLast) {
         drawScreenBase();     // ONCE, not every 100-150 ms
         drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
-                   "HOLD P=PTT MIC  ENTER=TG  M=CFG");
+                   "HOLD P=PTT  ENTER=TG  M=CFG");
     }
 
     if (headerChanged) {
@@ -800,7 +817,7 @@ static void drawUi()
         d.setTextColor(TFT_WHITE, bg);
         d.setTextSize(1);
         d.setCursor(5, APP_HEADER_H + 6);
-        d.printf("%s %s", profileName(), txActive ? "PTT MIC" : st.c_str());
+        d.printf("%s %s", profileName(), txActive ? "TX" : st.c_str());
         d.setCursor(W - 92, APP_HEADER_H + 6);
         d.printf("WiFi %ddBm ", rssi);
         lastState = st;
@@ -917,7 +934,7 @@ static void drawUi()
         if (txActive) {
             char tmp[64];
             unsigned long txSec = (now - txStateStartedMs) / 1000;
-            snprintf(tmp, sizeof(tmp), "PTT MIC %lus  TG %lu",
+            snprintf(tmp, sizeof(tmp), "TX %lus  TG %lu",
                      txSec, (unsigned long)activeTG);
             runtime = tmp;
         } else if (ci.active) {
@@ -1228,36 +1245,89 @@ static void queueAudioPacket(const uint8_t *payload27)
 // ODTP control
 // ------------------------------------------------------------
 
-void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
+static bool sendRewindPacket(uint16_t type, uint16_t flags, uint32_t sequence,
+                             const uint8_t* payload, uint16_t payloadLen)
 {
     if (WiFi.status() != WL_CONNECTED || !udpStarted) {
-        Serial.printf("[TX CTRL] skip type=0x%04X: network not ready\n", type);
-        return;
-    }
-
-    if (type == PKT_DMR_AUDIO ||
-        type == PKT_DMR_HEADER_FLC ||
-        type == PKT_DMR_TERMINATOR ||
-        type == PKT_DMR_EMBEDDED ||
-        type == PKT_SUPERHEADER) {
-        Serial.printf("[TX ALPHA BLOCK] voice TX disabled type=0x%04X\n", type);
-        return;
+        Serial.printf("[TX] skip type=0x%04X: network not ready\n", type);
+        return false;
     }
 
     uint8_t h[HEADER_LEN] = {0};
-
     memcpy(h, REWIND_SIGN, 8);
     put16le(h + 8, type);
-    put16le(h + 10, 0);
-    put32le(h + 12, seqNo++);
+    put16le(h + 10, flags);
+    put32le(h + 12, sequence);
     put16le(h + 16, payloadLen);
 
-    udp.beginPacket(bmIP, profilePort());
-    udp.write(h, sizeof(h));
-    if (payload && payloadLen) {
-        udp.write(payload, payloadLen);
+    if (!udp.beginPacket(bmIP, profilePort()))
+        return false;
+
+    size_t written = udp.write(h, sizeof(h));
+    if (payload && payloadLen)
+        written += udp.write(payload, payloadLen);
+
+    if (written != sizeof(h) + payloadLen) {
+        udp.endPacket();
+        return false;
     }
-    udp.endPacket();
+
+    return udp.endPacket() == 1;
+}
+
+void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
+{
+    if (!sendRewindPacket(type, 0, seqNo++, payload, payloadLen))
+        Serial.printf("[TX CTRL] failed type=0x%04X\n", type);
+}
+
+static bool sendRealtime(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
+{
+    const uint32_t seq = realtimeSeqNo++;
+    const bool ok = sendRewindPacket(type, REWIND_FLAG_REAL_TIME_1,
+                                     seq, payload, payloadLen);
+    if (!ok) {
+        ++txNetworkErrors;
+        Serial.printf("[TX RT] failed type=0x%04X seq=%lu\n",
+                      type, (unsigned long)seq);
+    }
+    return ok;
+}
+
+static void putCallsign10(uint8_t* dst, const char* call)
+{
+    memset(dst, 0, 10);
+    if (!call) return;
+    for (size_t i = 0; i < 10 && call[i]; ++i)
+        dst[i] = (uint8_t)call[i];
+}
+
+static bool sendTxSuperHeader()
+{
+    uint8_t payload[32] = {0};
+    put32le(payload + 0, SESSION_GROUP_VOICE);
+    put32le(payload + 4, profileRadioId());
+    put32le(payload + 8, activeTG);
+    putCallsign10(payload + 12, "IU2VTP");
+
+    char target[11] = {0};
+    snprintf(target, sizeof(target), "TG%lu", (unsigned long)activeTG);
+    putCallsign10(payload + 22, target);
+
+    const bool ok = sendRealtime(PKT_SUPERHEADER, payload, sizeof(payload));
+    if (ok)
+        Serial.printf("[PTT/TX] SUPERHEADER src=%lu dst=%lu\n",
+                      (unsigned long)profileRadioId(),
+                      (unsigned long)activeTG);
+    return ok;
+}
+
+static bool sendTxTerminator()
+{
+    const bool ok = sendRealtime(PKT_DMR_TERMINATOR, nullptr, 0);
+    if (ok)
+        Serial.println("[PTT/TX] TERMINATOR");
+    return ok;
 }
 
 void sendKeepalive()
@@ -1390,6 +1460,7 @@ static void startActiveConnection()
     if (!resolveActiveServer()) return;
 
     seqNo = 0;
+    realtimeSeqNo = 0;
     lastKeepaliveTx = 0;
     lastKeepaliveAck = 0;
     lastSubscribeTx = 0;
@@ -1401,6 +1472,10 @@ static void startActiveConnection()
 
 static void switchTalkgroup(uint32_t newTG, bool saveAsCurrent)
 {
+    if (txCaptureActive()) {
+        setUiNotice("Release PTT before changing TG");
+        return;
+    }
     if (newTG == 0 || newTG > 0xFFFFFF) return;
     uint32_t oldTG = activeTG;
 
@@ -1427,6 +1502,10 @@ static void switchTalkgroup(uint32_t newTG, bool saveAsCurrent)
 
 static void switchProfile(int delta)
 {
+    if (txCaptureActive()) {
+        setUiNotice("Release PTT before changing server");
+        return;
+    }
     if (profileCount == 0) return;
 
     int start = activeProfileIndex;
@@ -1596,7 +1675,8 @@ void handlePacket(uint8_t* buf, size_t n)
             if (state == State::SUBSCRIBED && plen == 27) {
                 ++audioPackets;
                 lastVoicePacketMs = millis();
-                queueAudioPacket(p);
+                if (!txCaptureActive())
+                    queueAudioPacket(p);
 
                 if (callInfoMutex && xSemaphoreTake(callInfoMutex, 0) == pdTRUE) {
                     // Audio proves RX activity, but it does NOT contain source/destination.
@@ -1642,9 +1722,18 @@ void handlePacket(uint8_t* buf, size_t n)
             }
             break;
 
+        case PKT_BUSY_NOTICE:
+            Serial.print("[RX] BUSY: ");
+            printHex(p, plen);
+            if (txCaptureActive())
+                abortTxSession("server busy");
+            break;
+
         case PKT_FAILURE:
             Serial.print("[RX] FAILURE: ");
             printHex(p, plen);
+            if (txCaptureActive())
+                abortTxSession("server failure");
             break;
 
         case PKT_CLOSE:
@@ -2434,7 +2523,16 @@ static bool startTxMicCapture()
         }
     }
 
+    if (!txDmrPacketQueue) {
+        txDmrPacketQueue = xQueueCreate(12, sizeof(TxDmrPacket));
+        if (!txDmrPacketQueue) {
+            Serial.println("[PTT/TX] DMR packet queue allocation failed");
+            return false;
+        }
+    }
+
     xQueueReset(txPcmQueue);
+    xQueueReset(txDmrPacketQueue);
     txMicFramesCaptured = 0;
     txPcmFramesQueued = 0;
     txPcmFramesConsumed = 0;
@@ -2445,7 +2543,12 @@ static bool startTxMicCapture()
     txAmbeEncodeFailures = 0;
     txDmrFramesInterleaved = 0;
     txDmrPacketsBuilt = 0;
+    txNetworkPacketsSent = 0;
+    txNetworkPacketDrops = 0;
+    txNetworkErrors = 0;
     txDmrFrameIndex = 0;
+    txNextPacketDueUs = micros();
+    txSessionAnnounced = false;
     memset(txDmrPacketBuild, 0, sizeof(txDmrPacketBuild));
     memset(txLastDmrPayload, 0, sizeof(txLastDmrPayload));
 
@@ -2516,6 +2619,10 @@ static void stopTxMicCapture()
                   (unsigned long)txAmbeEncodeFailures,
                   (unsigned long)txDmrFramesInterleaved,
                   (unsigned long)txDmrPacketsBuilt);
+    Serial.printf("[PTT/TX] network sent=%lu drops=%lu errors=%lu\n",
+                  (unsigned long)txNetworkPacketsSent,
+                  (unsigned long)txNetworkPacketDrops,
+                  (unsigned long)txNetworkErrors);
 }
 
 static void processTxPcmDebug()
@@ -2550,7 +2657,13 @@ static void processTxPcmDebug()
                 ++txDmrPacketsBuilt;
                 txDmrFrameIndex = 0;
 
-                // Print only the first complete packet for bench validation.
+                TxDmrPacket pkt;
+                memcpy(pkt.payload, txLastDmrPayload, sizeof(pkt.payload));
+                if (!txDmrPacketQueue ||
+                    xQueueSend(txDmrPacketQueue, &pkt, 0) != pdTRUE) {
+                    ++txNetworkPacketDrops;
+                }
+
                 if (txDmrPacketsBuilt == 1) {
                     Serial.print("[PTT/DMR] first 27-byte payload: ");
                     printHex(txLastDmrPayload, 27);
@@ -2560,6 +2673,72 @@ static void processTxPcmDebug()
     }
 }
 
+static void processTxNetwork()
+{
+    if (!txSessionAnnounced || !txDmrPacketQueue) return;
+
+    const uint32_t nowUs = micros();
+    if ((int32_t)(nowUs - txNextPacketDueUs) < 0)
+        return;
+
+    TxDmrPacket pkt;
+    if (xQueueReceive(txDmrPacketQueue, &pkt, 0) == pdTRUE) {
+        if (sendRealtime(PKT_DMR_AUDIO, pkt.payload, sizeof(pkt.payload)))
+            ++txNetworkPacketsSent;
+
+        txNextPacketDueUs += TX_PACKET_PERIOD_US;
+
+        // If the loop was stalled badly, do not burst old voice packets.
+        if ((int32_t)(nowUs - txNextPacketDueUs) >
+            (int32_t)(TX_PACKET_PERIOD_US * 3UL)) {
+            txNextPacketDueUs = nowUs + TX_PACKET_PERIOD_US;
+        }
+    }
+}
+
+static void flushTxNetworkQueue(unsigned long maxWaitMs)
+{
+    const unsigned long start = millis();
+
+    while (txDmrPacketQueue &&
+           uxQueueMessagesWaiting(txDmrPacketQueue) > 0 &&
+           millis() - start < maxWaitMs &&
+           WiFi.status() == WL_CONNECTED) {
+        processTxNetwork();
+        delay(1);
+    }
+}
+
+static void abortTxSession(const char* reason)
+{
+    if (txState == TxState::IDLE) return;
+
+    Serial.printf("[PTT/TX] abort: %s\n", reason ? reason : "unknown");
+
+    txState = TxState::IDLE;
+    txStateStartedMs = 0;
+    pttWasDown = false;
+
+    M5Cardputer.Mic.end();
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+    if (txAmbeEncoderAvailable())
+        txAmbeEncoderEnd();
+
+    if (txPcmQueue) xQueueReset(txPcmQueue);
+    if (txDmrPacketQueue) xQueueReset(txDmrPacketQueue);
+
+    if (txSessionAnnounced && WiFi.status() == WL_CONNECTED && udpStarted)
+        sendTxTerminator();
+
+    txSessionAnnounced = false;
+    txDmrFrameIndex = 0;
+
+    M5Cardputer.Speaker.begin();
+    applySpeakerVolume();
+    rxUiDirty = true;
+    lastUiDraw = 0;
+}
+
 static void beginPttTest()
 {
     if (txState != TxState::IDLE) return;
@@ -2567,6 +2746,12 @@ static void beginPttTest()
     if (uiMode != UiMode::MAIN || !dmrSessionReady()) {
         setUiNotice("PTT unavailable: DMR not ready");
         Serial.println("[PTT] ignored: DMR session not ready");
+        return;
+    }
+
+    if (!txAmbeEncoderAvailable()) {
+        setUiNotice("PTT unavailable: AMBE TX backend missing");
+        Serial.println("[PTT] ignored: embedded AMBE backend unavailable");
         return;
     }
 
@@ -2580,26 +2765,63 @@ static void beginPttTest()
         return;
     }
 
+    // Drop queued RX voice and enter explicit half-duplex mode.
+    if (audioQueue) xQueueReset(audioQueue);
+
+    realtimeSeqNo = 0;
+    txNextPacketDueUs = micros();
+
+    if (!sendTxSuperHeader()) {
+        abortTxSession("superheader failed");
+        setUiNotice("PTT TX start failed");
+        return;
+    }
+
+    txSessionAnnounced = true;
     rxUiDirty = true;
     lastUiDraw = 0;
-    Serial.printf("[PTT] MIC START TG %lu (voice TX disabled)\n",
-                  (unsigned long)activeTG);
+
+    Serial.printf("[PTT] TX START TG %lu src=%lu\n",
+                  (unsigned long)activeTG,
+                  (unsigned long)profileRadioId());
 }
 
 static void endPttTest()
 {
     if (txState == TxState::IDLE) return;
 
-    unsigned long elapsed = millis() - txStateStartedMs;
+    const unsigned long elapsed = millis() - txStateStartedMs;
+
+    // Stop producing PCM first, then consume any complete queued frames.
+    M5Cardputer.Mic.end();
+    M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
+
+    processTxPcmDebug();
+    flushTxNetworkQueue(600);
+
+    // A trailing 1-2 AMBE frame partial packet is intentionally discarded
+    // rather than inventing an unverified silence codeword.
+    txDmrFrameIndex = 0;
+
+    if (txSessionAnnounced)
+        sendTxTerminator();
+
+    txSessionAnnounced = false;
     txState = TxState::IDLE;
     txStateStartedMs = 0;
 
     stopTxMicCapture();
 
+    if (audioQueue) xQueueReset(audioQueue);
+
     rxUiDirty = true;
     lastUiDraw = 0;
-    Serial.printf("[PTT] MIC END after %lu ms (no voice transmitted)\n",
-                  elapsed);
+
+    Serial.printf("[PTT] TX END after %lu ms sent=%lu neterr=%lu drop=%lu\n",
+                  elapsed,
+                  (unsigned long)txNetworkPacketsSent,
+                  (unsigned long)txNetworkErrors,
+                  (unsigned long)txNetworkPacketDrops);
 }
 
 static void handlePttState()
@@ -3226,7 +3448,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha4");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha5");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / TX experimental");
@@ -3398,6 +3620,17 @@ void loop()
 
     handleKeyboard();
     processTxPcmDebug();
+    processTxNetwork();
+
+    if (txCaptureActive()) {
+        if (WiFi.status() != WL_CONNECTED || !udpStarted) {
+            abortTxSession("network lost");
+        } else if (millis() - txStateStartedMs >= TX_MAX_MS) {
+            abortTxSession("TX timeout");
+            setUiNotice("PTT stopped: TX timeout");
+        }
+    }
+
     if (uiMode == UiMode::MAIN) {
         drawUi();
     }
