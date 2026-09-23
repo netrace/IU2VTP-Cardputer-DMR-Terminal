@@ -14,9 +14,20 @@ if not archive.is_file():
     print(f"[AMBE] Rust backend archive not found: {archive}")
     env.Exit(1)
 
-print(f"[AMBE] Linking Rust backend: {archive}")
+if not archive.name.startswith("lib") or archive.suffix != ".a":
+    print(f"[AMBE] Expected lib*.a archive, got: {archive.name}")
+    env.Exit(1)
 
+lib_name = archive.name[3:-2]
+
+print(f"[AMBE] Linking Rust backend: {archive}")
+print(f"[AMBE] LIBPATH={archive.parent} LIBS={lib_name}")
+
+# Important: use SCons' LIBPATH/LIBS rather than putting the archive in
+# LINKFLAGS. PlatformIO emits LIBS after object files, so the archive is
+# searched after tx_ambe_encoder.cpp has introduced the C-ABI references.
 env.Append(
     CPPDEFINES=["IU2VTP_TX_AMBE_RUST=1"],
-    LINKFLAGS=[str(archive)],
+    LIBPATH=[str(archive.parent)],
+    LIBS=[lib_name],
 )
