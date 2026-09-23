@@ -1,0 +1,222 @@
+name: Apply PTT alpha1
+
+on:
+  push:
+    branches:
+      - feature/ptt-tx
+    paths:
+      - ".github/workflows/apply-ptt-alpha1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/ptt-tx
+          fetch-depth: 0
+
+      - name: Apply PTT alpha1 patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("src/main.cpp")
+          s = p.read_text()
+
+          def once(old, new):
+              global s
+              if old not in s:
+                  raise SystemExit(f"Missing patch anchor: {old[:80]!r}")
+              s = s.replace(old, new, 1)
+
+          once('APP_VERSION = "1.0.3";',
+               'APP_VERSION = "1.1.0-alpha1";')
+          once('APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.0.3";',
+               'APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0-alpha1";')
+
+          once("""// IU2VTP Cardputer DMR Terminal v1.0.3
+          // AMBE parameter diagnostic - NO mbelib / NO FFT / NO speaker
+          //
+          // RX-only.""",
+          """// IU2VTP Cardputer DMR Terminal v1.1.0-alpha1
+          // Experimental PTT state machine.
+          // Voice TX remains hard-blocked in this alpha.""")
+
+          state = """enum class State {
+              WAIT_CHALLENGE,
+              WAIT_AUTH_ACK,
+              AUTHENTICATED,
+              WAIT_SUB_ACK,
+              SUBSCRIBED
+          };
+          """
+
+          once(state, state + """
+          // Experimental TX/PTT state. Alpha1 deliberately does not send DMR voice.
+          enum class TxState {
+              IDLE,
+              PTT_HELD_TEST
+          };
+
+          TxState txState = TxState::IDLE;
+          unsigned long txStateStartedMs = 0;
+          bool pttWasDown = false;
+
+          static bool txTestActive()
+          {
+              return txState == TxState::PTT_HELD_TEST;
+          }
+          """)
+
+          once('Serial.printf("[RX-ONLY BLOCK] TX type=0x%04X\\n", type);',
+               'Serial.printf("[TX ALPHA BLOCK] voice TX disabled type=0x%04X\\n", type);')
+
+          once("""drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
+                             "ENTER=direct TG  M=SETTINGS");""",
+               """drawFooter("UP/DOWN=TG  LEFT/RIGHT=SERVER",
+                             "HOLD P=PTT TEST  ENTER=TG  M=CFG");""")
+
+          once('const bool stateChanged = !haveLast || st != lastState;',
+               'const bool stateChanged = !haveLast || st != lastState;\n    const bool txActive = txTestActive();')
+
+          once("""bool headerChanged = stateChanged || abs(rssi - lastRssi) >= 2 ||
+                                   ci.active != lastCi.active;""",
+               """bool headerChanged = stateChanged || abs(rssi - lastRssi) >= 2 ||
+                                   ci.active != lastCi.active || txActive;""")
+
+          once('uint16_t bg = ci.active ? TFT_DARKGREEN : TFT_DARKGREY;',
+               'uint16_t bg = txActive ? TFT_RED : (ci.active ? TFT_DARKGREEN : TFT_DARKGREY);')
+
+          once('d.printf("%s %s", profileName(), st.c_str());',
+               'd.printf("%s %s", profileName(), txActive ? "PTT TEST" : st.c_str());')
+
+          once("""        String speaker;
+                  if (ci.metadataValid) {""",
+               """        String speaker;
+                  if (txActive) {
+                      speaker = "PTT HELD - TX DISABLED";
+                  } else if (ci.metadataValid) {""")
+
+          once("""        String idline;
+                  if (ci.metadataValid && ci.source) {""",
+               """        String idline;
+                  if (txActive) {
+                      idline = "Experimental PTT state only";
+                  } else if (ci.metadataValid && ci.source) {""")
+
+          once("""        String line2;
+                  if (ci.metadataValid && strlen(ci.name)) {""",
+               """        String line2;
+                  if (txActive) {
+                      unsigned long txSec = (millis() - txStateStartedMs) / 1000;
+                      line2 = "Held ";
+                      line2 += String(txSec);
+                      line2 += "s - no voice sent";
+                  } else if (ci.metadataValid && strlen(ci.name)) {""")
+
+          once("""        String runtime;
+                  if (ci.active) {""",
+               """        String runtime;
+                  if (txActive) {
+                      char tmp[64];
+                      unsigned long txSec = (now - txStateStartedMs) / 1000;
+                      snprintf(tmp, sizeof(tmp), "PTT TEST %lus  TG %lu",
+                               txSec, (unsigned long)activeTG);
+                      runtime = tmp;
+                  } else if (ci.active) {""")
+
+          helper = r'''static bool pttKeyDown()
+          {
+              return M5Cardputer.Keyboard.isKeyPressed('p') ||
+                     M5Cardputer.Keyboard.isKeyPressed('P');
+          }
+
+          static void beginPttTest()
+          {
+              if (txState != TxState::IDLE) return;
+
+              if (uiMode != UiMode::MAIN || !dmrSessionReady()) {
+                  setUiNotice("PTT unavailable: DMR not ready");
+                  Serial.println("[PTT] ignored: DMR session not ready");
+                  return;
+              }
+
+              txState = TxState::PTT_HELD_TEST;
+              txStateStartedMs = millis();
+              rxUiDirty = true;
+              lastUiDraw = 0;
+              Serial.printf("[PTT] TEST START TG %lu (voice TX disabled)\n",
+                            (unsigned long)activeTG);
+          }
+
+          static void endPttTest()
+          {
+              if (txState == TxState::IDLE) return;
+
+              unsigned long elapsed = millis() - txStateStartedMs;
+              txState = TxState::IDLE;
+              txStateStartedMs = 0;
+              rxUiDirty = true;
+              lastUiDraw = 0;
+              Serial.printf("[PTT] TEST END after %lu ms (no voice transmitted)\n",
+                            elapsed);
+          }
+
+          static void handlePttState()
+          {
+              const bool down = (uiMode == UiMode::MAIN) && pttKeyDown();
+
+              if (down && !pttWasDown)
+                  beginPttTest();
+              else if (!down && pttWasDown)
+                  endPttTest();
+
+              pttWasDown = down;
+          }
+
+          '''
+
+          once('static void handleKeyboard()\n{',
+               helper + 'static void handleKeyboard()\n{')
+
+          once("""void loop()
+          {
+              M5Cardputer.update();
+          """,
+               """void loop()
+          {
+              M5Cardputer.update();
+              handlePttState();
+          """)
+
+          s = s.replace("IU2VTP Cardputer DMR Terminal v1.0.3",
+                        "IU2VTP Cardputer DMR Terminal v1.1.0-alpha1")
+
+          p.write_text(s)
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Build alpha1
+        run: pio run -e m5stack-stamps3
+
+      - name: Commit alpha1
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.cpp
+          git commit -m "Add experimental PTT alpha1 state machine"
+          git push origin HEAD:feature/ptt-tx
