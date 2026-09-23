@@ -158,6 +158,8 @@ enum class TxCallMode {
 static TxCallMode txCallMode = TxCallMode::GROUP;
 static uint32_t txPrivateId = 0;
 
+extern uint32_t activeTG;
+
 static const char* txCallModeLabel()
 {
     return txCallMode == TxCallMode::PRIVATE ? "PRIVATE" : "GROUP";
