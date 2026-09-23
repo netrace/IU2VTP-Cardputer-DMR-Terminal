@@ -11,6 +11,10 @@
 #include "dmr_ambe_mapping.h"
 #include "rewind_tx_protocol.h"
 
+// blip25 AMBE encoding uses substantially more stack than Arduino's default 8 KB loopTask.
+// Espressif officially supports overriding the loop task stack this way.
+SET_LOOP_TASK_STACK_SIZE(32 * 1024);
+
 extern "C" {
 #include <mbelib.h>
 
@@ -3584,6 +3588,9 @@ void setup()
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / TX experimental");
+    Serial.printf("[BOOT] loopTask stack=%lu bytes free=%u\n",
+                  (unsigned long)getArduinoLoopTaskStackSize(),
+                  (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
     if (!dmrAmbeMappingSelfTest()) {
         Serial.println("[STOP] DMR AMBE mapping self-test FAILED");
@@ -3797,6 +3804,9 @@ void loop()
         uint32_t avgUs = decodePacketsTimed
             ? (uint32_t)(decodeMicrosTotal / decodePacketsTimed)
             : 0;
+
+        Serial.printf("[STACK] loop free=%u bytes\n",
+                      (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
         Serial.printf(
             "[STATS] rx=%lu played=%lu frames=%lu drops=%lu queue=%u decode_avg=%luus decode_max=%luus realtime=%s peak=%lu clips=%lu\n",
