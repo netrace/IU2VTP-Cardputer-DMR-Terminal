@@ -1341,18 +1341,15 @@ static bool sendTxSuperHeader()
     const uint32_t dst = txDestinationId();
     const uint32_t sessionType = txSessionType();
 
-    char target[11] = {0};
-    if (txCallMode == TxCallMode::PRIVATE)
-        snprintf(target, sizeof(target), "%lu", (unsigned long)dst);
-    else
-        snprintf(target, sizeof(target), "TG%lu", (unsigned long)dst);
-
+    // Match the known-working ODMRTP transmitter exactly: populate the
+    // source callsign field and leave the 10-byte target callsign field zeroed.
+    // Destination routing is already carried by targetId.
     rewindTxBuildSuperHeader(payload,
                              sessionType,
                              profileRadioId(),
                              dst,
                              "IU2VTP",
-                             target);
+                             nullptr);
 
     const bool ok = sendRealtime(PKT_SUPERHEADER, payload, sizeof(payload));
     if (ok)
