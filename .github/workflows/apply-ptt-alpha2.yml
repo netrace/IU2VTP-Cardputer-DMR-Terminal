@@ -94,15 +94,15 @@ jobs:
           s = s.replace('"Experimental PTT state only"', '"Mic capture 16k -> PCM 8k"')
           s = s.replace('"PTT TEST %lus  TG %lu"', '"PTT MIC %lus  TG %lu"')
 
-          once("""                      line2 = "Held ";
-                      line2 += String(txSec);
-                      line2 += "s - no voice sent";""",
-               """                      line2 = "Mic ";
-                      line2 += String(txMicPeak);
-                      line2 += " pk  q:";
-                      line2 += String(txPcmQueue ? uxQueueMessagesWaiting(txPcmQueue) : 0);
-                      line2 += " d:";
-                      line2 += String(txPcmQueueDrops);""")
+          once("""            line2 = "Held ";
+            line2 += String(txSec);
+            line2 += "s - no voice sent";""",
+               """            line2 = "Mic ";
+            line2 += String(txMicPeak);
+            line2 += " pk  q:";
+            line2 += String(txPcmQueue ? uxQueueMessagesWaiting(txPcmQueue) : 0);
+            line2 += " d:";
+            line2 += String(txPcmQueueDrops);""")
 
           old_helpers = r'''static bool pttKeyDown()
           {
