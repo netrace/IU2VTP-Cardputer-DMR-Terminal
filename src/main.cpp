@@ -69,6 +69,7 @@ enum PacketType : uint16_t {
     PKT_REDIRECTION     = 0x0008,
     PKT_REPORT          = 0x0100,
     PKT_BUSY_NOTICE     = 0x0200,
+    PKT_CONFIGURATION   = 0x0900,
     PKT_SUBSCRIPTION    = 0x0901,
     PKT_CANCELLING      = 0x0902,
     PKT_DMR_HEADER_FLC  = 0x0911,
@@ -1416,6 +1417,15 @@ void sendAuthentication(const uint8_t token[4])
     Serial.println("[TX CTRL] AUTHENTICATION");
 }
 
+void sendConfiguration()
+{
+    uint8_t payload[4] = {0};
+    // REWIND_OPTION_SUPER_HEADER = 1 << 0
+    put32le(payload, 1);
+    sendControl(PKT_CONFIGURATION, payload, sizeof(payload));
+    Serial.println("[TX CTRL] CONFIGURATION SuperHeader");
+}
+
 void sendSubscription()
 {
     uint8_t payload[8];
@@ -1611,6 +1621,7 @@ void handlePacket(uint8_t* buf, size_t n)
                 state == State::WAIT_CHALLENGE) {
                 Serial.println("[AUTH] LOGIN ACCEPTED");
                 state = State::AUTHENTICATED;
+                sendConfiguration();
                 sendSubscription();
             }
             break;
@@ -2759,11 +2770,12 @@ static void processTxPcmDebug()
 
         ++txAmbeFramesEncoded;
 
-        uint8_t dmr9[9] = {0};
-        dmrCanonical72ToInterleaved(canonical, dmr9);
-        ++txDmrFramesInterleaved;
+        // Open DMR Terminal / REWIND type 0x0920 carries three bare
+        // 9-byte AMBE "mode 33" frames. Do NOT apply the RF/DMR
+        // rW/rX/rY/rZ interleave used by the over-the-air decoder path.
+        ++txDmrFramesInterleaved; // retained as TX-frame counter for now
 
-        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
+        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, canonical, 9);
         ++txDmrFrameIndex;
 
         if (txDmrFrameIndex == 3) {
@@ -2779,7 +2791,7 @@ static void processTxPcmDebug()
             }
 
             if (txDmrPacketsBuilt == 1) {
-                Serial.print("[PTT/DMR] first 27-byte payload: ");
+                Serial.print("[PTT/AMBE] first mode33 27-byte payload: ");
                 printHex(txLastDmrPayload, 27);
             }
         }
