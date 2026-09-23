@@ -1,49 +1,56 @@
-# feature/ptt-tx branch override
-
-On `feature/ptt-tx`, implement PTT/TX only as a separate experimental subsystem. Do not modify the known-good RX deinterleave/mbelib path. Early alphas must keep actual DMR voice TX blocked.
-
 # GitHub Copilot Instructions
 
-You are working on **IU2VTP Cardputer DMR Terminal**, a receive-only DMR-over-IP client for M5Stack Cardputer.
+You are working on **IU2VTP Cardputer DMR Terminal**, an RX/TX DMR-over-IP client for M5Stack Cardputer.
 
 Follow `AGENTS.md` as the authoritative repository guidance.
 
-## Non-negotiable rule
-
-The project must remain **RX-only**.
-
-Never generate code for:
-
-- PTT
-- microphone capture
-- AMBE encode
-- DMR voice/audio TX
-- TX voice headers
-- TX terminators
-- audio transmission queues
-- DMR transmission UI
-
-Minimal ODTP control-plane traffic for authentication, keepalive, subscription, and cancellation is allowed.
-
-## Do not casually modify the working audio decoder
-
-The known-good path is:
+## Protected RX path
 
 ```text
-27-byte DMR audio payload
-→ 3 × 9-byte AMBE frames
-→ DMR deinterleave
+27-byte ODTP audio
+→ 3 × 9-byte DMR AMBE frames
+→ rW/rX/rY/rZ deinterleave
 → classic mbelib
-→ 8 kHz mono PCM
-→ Cardputer speaker
+→ 8 kHz PCM
+→ speaker
 ```
 
-Preserve the existing DMR `rW/rX/rY/rZ` deinterleave mapping unless the task specifically targets decoder correctness.
+## Protected TX path
 
-## UI/navigation rules
+```text
+microphone
+→ 8 kHz / 160 PCM
+→ blip25 AMBE+2
+→ DMR rW/rX/rY/rZ interleave
+→ 3 × 9-byte frames
+→ ODTP 0x0920
+```
 
-Use the shared navigation framework:
+Verified call framing:
 
+```text
+0x0911 Voice LC
+0x0911 Voice LC
+0x0920 audio...
+0x0912 terminator
+```
+
+Do not change this to SUPERHEADER-only call setup.
+
+## TX semantics
+
+- G0 / BtnA: primary hold-to-talk
+- P: fallback hold-to-talk
+- C: GROUP / PRIVATE
+- I: private destination DMR ID
+- group TX destination = active TG
+- private TX destination is separate and must not change active TG
+- half-duplex only
+- abort safely on BUSY, FAILURE, timeout or network loss
+
+## UI/navigation
+
+Use:
 ```cpp
 navigateTo(...)
 navigateBack(...)
@@ -51,116 +58,27 @@ resetNavigation(...)
 renderCurrentScreen()
 ```
 
-Use the shared visual helpers:
+Use shared visual helpers instead of duplicating chrome.
 
-```cpp
-drawAppHeader()
-drawFooter(...)
-drawScreenBase()
-drawScreenChrome(...)
-```
+## Profiles / talkgroups
 
-Do not invent one-off navigation paths.
-
-Do not directly set `uiMode` and clear the display without ensuring the destination screen is rendered.
-
-When returning to `MAIN`, invalidate RX display cache state.
-
-## Input rules
-
-Text/TG input is transient UI state.
-
-Preserve and use:
-
-```cpp
-inputReturnMode
-inputTarget
-inputBuffer
-inputTitle
-inputNumericOnly
-inputSecret
-```
-
-Do not derive the return screen from numeric `inputTarget` ranges.
-
-Direct TG entry must remain repeatable and must persist the actual RX TG.
-
-## Profiles
-
-Do not assume profile index 0 is active.
-
-Use:
-
-```cpp
-activeProfileIndex
-```
-
-Single-profile operation must continue to work.
-
-BrandMeister and HamThings are templates, not mandatory simultaneous configurations.
-
-## Talkgroups
-
-Keep separate:
-
-```text
-favoriteTGIndex
-favoriteTGs[]
-activeTG
-```
-
-`activeTG` is the actual RX TG and must survive reboot through the `currenttg` NVS key.
-
-## State semantics
-
-Do not show “Connecting to DMR...” during a TG switch if authentication is already complete.
-
-`WAIT_SUB_ACK` means:
-
-```text
-DMR transport/authenticated
-+ waiting for TG subscription confirmation
-```
+Use `activeProfileIndex`; never assume profile 0.
+Keep active TG, favorites and private destination as separate state.
 
 ## Networking
 
-Do not initialize/use UDP before Wi-Fi is connected.
+Do not initialize/use UDP before Wi-Fi is connected. Preserve `ensureUdpStarted()`.
 
-Use `ensureUdpStarted()`.
-
-Do not reintroduce boot-time lwIP assertions.
+Routine and realtime Rewind sequence spaces are separate; realtime sequence is monotonic for the connection.
 
 ## Secrets
 
-Never:
+Never hard-code or print user credentials.
 
-- hard-code Wi-Fi credentials
-- hard-code user passwords
-- print passwords to Serial
-- add real passwords to examples
+## Change strategy
 
-## C++ compile-order discipline
-
-`main.cpp` is large and forward declarations matter.
-
-Before completing edits, verify:
-
-- one definition per function
-- prototypes before use
-- no duplicate default arguments
-- `makePresetProfiles()` still exists
-- navigation functions are not duplicated
-- input helper functions are declared before callers
-
-## Language
-
-All user-facing UI and serial/status text should be **en-US**.
-
-## Preferred change strategy
-
-For unrelated UI/network bugs:
-
-- do not touch AMBE/deinterleave/audio code
-- do not redesign protocol code
-- make the smallest coherent change
-- preserve known-good behavior
+For unrelated UI/config bugs:
+- do not touch working RX/TX audio paths,
+- do not redesign ODTP framing,
+- make the smallest coherent change,
+- compile and run relevant host tests.
