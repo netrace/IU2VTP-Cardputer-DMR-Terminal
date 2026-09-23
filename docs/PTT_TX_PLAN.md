@@ -81,7 +81,7 @@ into this MIT project.
 The next alpha3 step is a Rust/FFI ESP32-S3 backend using the MIT reference
 implementation, with the upstream patent notice retained and documented.
 
-### v1.1.0-alpha4 — DMR framing
+### ✅ v1.1.0-alpha4 — DMR framing
 
 Add a TX-side DMR interleave/framing module.
 
@@ -100,18 +100,29 @@ one 27-byte ODTP audio payload
 Do not reuse RX deinterleave code by reversing assumptions implicitly. Keep
 explicit TX mapping and tests.
 
-### v1.1.0-alpha5 — Rewind / ODTP voice TX
+### 🚧 v1.1.0-alpha5 — Rewind / ODTP voice TX
 
-Only after the exact server-side sequence is verified:
+Implemented on the feature branch:
 
-- call/session start
-- group/private destination semantics
-- DMR header / SUPERHEADER requirements
-- audio subtype / flag sequencing
-- 60 ms packet pacing
-- terminator
-- server ACK/failure behavior
-- busy/error handling
+- group-voice SUPERHEADER start (32-byte payload);
+- independent realtime sequence space;
+- REAL_TIME_1 packet flag;
+- 27-byte DMR audio packets;
+- ~60 ms network pacing;
+- empty DMR terminator on PTT release;
+- half-duplex RX suppression while transmitting;
+- server BUSY / FAILURE abort;
+- network-loss abort;
+- maximum continuous TX timeout;
+- TG/server switching blocked while PTT is active;
+- re-key latch after forced abort.
+
+Still to validate on-air / against a live Open DMR Terminal server:
+
+- exact audio bit ordering expected in the TX direction;
+- server acceptance of the generated AMBE payload;
+- practical call-start / call-end behavior;
+- audio quality and latency.
 
 ## Proposed code boundaries
 
