@@ -43,6 +43,14 @@ int main()
     if (std::memcmp(sh + 12, "IU2VTP", 6) != 0) return fail("source call");
     if (std::memcmp(sh + 22, "TG222", 5) != 0) return fail("target call");
 
+    uint8_t priv[32];
+    rewindTxBuildSuperHeader(priv, 5, 2232489, 2221234, "IU2VTP", "2221234");
+
+    if (get32le(priv + 0) != 5) return fail("private session type");
+    if (get32le(priv + 4) != 2232489) return fail("private source id");
+    if (get32le(priv + 8) != 2221234) return fail("private target id");
+    if (std::memcmp(priv + 22, "2221234", 7) != 0) return fail("private target call");
+
     uint8_t audioHeader[18];
     rewindTxBuildHeader(audioHeader, 0x0920, 0x0001, 1, 27);
     if (get16le(audioHeader + 8) != 0x0920) return fail("audio type");
