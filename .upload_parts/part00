@@ -1,0 +1,267 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <mbedtls/sha256.h>
+#include <M5Cardputer.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <Preferences.h>
+#include "config.h"
+
+extern "C" {
+#include <mbelib.h>
+
+static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
+static constexpr const char* APP_VERSION = "1.0.3";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.0.3";
+
+static constexpr int APP_HEADER_H = 14;
+static constexpr int APP_FOOTER_H = 24;
+// Header helpers are defined here, before any UI code uses them.
+static void drawAppHeader()
+{
+    auto& d = M5Cardputer.Display;
+    d.fillRect(0, 0, d.width(), APP_HEADER_H, TFT_DARKGREY);
+    d.setTextColor(TFT_WHITE, TFT_DARKGREY);
+    d.setTextSize(1);
+    d.setCursor(3, 3);
+    d.print(APP_TITLE);
+}
+
+static void clearContentArea()
+{
+    auto& d = M5Cardputer.Display;
+    const int h = d.height() - APP_HEADER_H - APP_FOOTER_H;
+    d.fillRect(0, APP_HEADER_H, d.width(), h, TFT_BLACK);
+}
+
+static void drawScreenBase()
+{
+    auto& d = M5Cardputer.Display;
+    d.fillScreen(TFT_BLACK);
+    drawAppHeader();
+}
+
+void mbe_checkGolayBlock(long int *block);
+}
+
+// ============================================================
+// IU2VTP Cardputer DMR Terminal v1.0.3
+// AMBE parameter diagnostic - NO mbelib / NO FFT / NO speaker
+//
+// RX-only.
+// ============================================================
+
+static constexpr char REWIND_SIGN[] = "REWIND01";
+static constexpr size_t HEADER_LEN = 18;
+
+enum PacketType : uint16_t {
+    PKT_KEEPALIVE       = 0x0000,
+    PKT_CLOSE           = 0x0001,
+    PKT_CHALLENGE       = 0x0002,
+    PKT_AUTHENTICATION  = 0x0003,
+    PKT_REDIRECTION     = 0x0008,
+    PKT_REPORT          = 0x0100,
+    PKT_SUBSCRIPTION    = 0x0901,
+    PKT_CANCELLING      = 0x0902,
+    PKT_DMR_HEADER_FLC  = 0x0911,
+    PKT_DMR_TERMINATOR  = 0x0912,
+    PKT_DMR_AUDIO       = 0x0920,
+    PKT_DMR_EMBEDDED    = 0x0927,
+    PKT_SUPERHEADER     = 0x0928,
+    PKT_FAILURE         = 0x0929
+};
+
+static constexpr uint8_t SERVICE_OPEN_TERMINAL = 0x21;
+static constexpr uint32_t SESSION_GROUP_VOICE = 7;
+
+enum class State {
+    WAIT_CHALLENGE,
+    WAIT_AUTH_ACK,
+    AUTHENTICATED,
+    WAIT_SUB_ACK,
+    SUBSCRIBED
+};
+
+WiFiUDP udp;
+bool udpStarted = false;
+IPAddress bmIP;
+
+State state = State::WAIT_CHALLENGE;
+
+uint32_t seqNo = 0;
+
+// ============================================================
+// Persistent runtime configuration
+// ============================================================
+static constexpr uint16_t DMR_DEFAULT_PORT = 54006;
+static constexpr uint8_t MAX_PROFILES = 6;
+static constexpr uint8_t MAX_FAVORITE_TGS = 16;
+
+static constexpr uint8_t MAX_WIFI_SCAN = 20;
+
+struct WifiConfig {
+    char ssid[33] = "";
+    char password[65] = "";
+};
+
+WifiConfig wifiConfig;
+
+struct WifiScanEntry {
+    String ssid;
+    int32_t rssi = -127;
+    bool open = false;
+};
+
+WifiScanEntry wifiScan[MAX_WIFI_SCAN];
+uint8_t wifiScanCount = 0;
+uint8_t wifiMenuIndex = 0;
+bool wifiScanning = false;
+
+bool wifiHomeDirty = true;
+bool wifiScanDirty = true;
+
+bool wifiEverConnected = false;
+unsigned long lastWifiReconnectAttempt = 0;
+
+struct DmrProfile {
+    char name[18] = "";
+    char host[64] = "";
+    uint16_t port = DMR_DEFAULT_PORT;
+    uint32_t radioId = 0;
+    char password[48] = "";
+    bool enabled = true;
+};
+
+Preferences prefs;
+DmrProfile profiles[MAX_PROFILES];
+uint8_t profileCount = 0;
+uint8_t activeProfileIndex = 0;
+
+uint32_t favoriteTGs[MAX_FAVORITE_TGS] = {222};
+uint8_t favoriteTGCount = 1;
+uint8_t activeTGIndex = 0;
+uint32_t activeTG = 222;
+
+uint8_t speakerVolume = 170;  // 0..255, persisted in NVS
+
+enum class UiMode {
+    MAIN,
+    TG_INPUT,
+    CONFIG_HOME,
+    CONFIG_PROFILES,
+    CONFIG_PROFILE_EDIT,
+    CONFIG_TGS,
+    WIFI_HOME,
+    WIFI_SCAN,
+    WIFI_PASSWORD,
+    AUDIO_VOLUME,
+    TEXT_INPUT
+};
+
+UiMode uiMode = UiMode::MAIN;
+
+// Central UI navigation state.
+// Every screen transition goes through navigateTo()/navigateBack().
+static constexpr uint8_t NAV_STACK_MAX = 8;
+UiMode navStack[NAV_STACK_MAX];
+uint8_t navDepth = 0;
+UiMode inputReturnMode = UiMode::MAIN;
+bool rxUiDirty = true;
+
+int menuIndex = 0;
+int editProfileIndex = 0;
+int editFieldIndex = 0;
+String inputBuffer;
+bool inputNumericOnly = false;
+bool inputSecret = false;
+String inputTitle;
+int inputTarget = 0;
+
+bool setupFlowActive = false;   // first-run guided flow: Wi-Fi -> DMR -> TG -> RX
+String uiNotice = "";
+unsigned long uiNoticeUntil = 0;
+
+static const char* profileName() {
+    return (profileCount && activeProfileIndex < profileCount)
+        ? profiles[activeProfileIndex].name : "No profile";
+}
+static const char* profileHost() {
+    return (profileCount && activeProfileIndex < profileCount)
+        ? profiles[activeProfileIndex].host : "";
+}
+static uint32_t profileRadioId() {
+    return (profileCount && activeProfileIndex < profileCount)
+        ? profiles[activeProfileIndex].radioId : 0;
+}
+static const char* profilePassword() {
+    return (profileCount && activeProfileIndex < profileCount)
+        ? profiles[activeProfileIndex].password : "";
+}
+static uint16_t profilePort() {
+    return (profileCount && activeProfileIndex < profileCount)
+        ? profiles[activeProfileIndex].port : DMR_DEFAULT_PORT;
+}
+
+unsigned long lastKeepaliveTx = 0;
+unsigned long lastKeepaliveAck = 0;
+unsigned long lastSubscribeTx = 0;
+
+uint32_t audioPackets = 0;
+uint32_t ambeFrames = 0;
+
+// Audio path: ODTP loop pushes 27-byte AMBE packets into a queue.
+// A dedicated task owns mbelib state and the PCM buffer.
+struct AudioPacket {
+    uint8_t ambe[27];
+};
+
+static constexpr size_t AUDIO_QUEUE_DEPTH = 160;
+QueueHandle_t audioQueue = nullptr;
+TaskHandle_t audioTaskHandle = nullptr;
+
+volatile uint32_t audioQueueDrops = 0;
+volatile uint32_t audioPacketsPlayed = 0;
+volatile uint32_t audioFramesDecoded = 0;
+volatile uint32_t decodePacketsTimed = 0;
+volatile uint64_t decodeMicrosTotal = 0;
+volatile uint32_t decodeMicrosMax = 0;
+volatile uint32_t pcmClipSamples = 0;
+
+volatile uint32_t pcmPeakSeen = 0;
+
+// ------------------------------------------------------------
+// Live call / display state
+// ------------------------------------------------------------
+struct CallInfo {
+    bool active = false;
+    bool metadataValid = false;
+    bool privateCall = false;
+    uint8_t flcByte1 = 0;
+    uint8_t feature = 0;
+    uint8_t service = 0;
+    uint16_t rewindFlags = 0;
+    uint32_t source = 0;
+    uint32_t destination = 222;
+    uint32_t startMs = 0;
+    uint32_t endMs = 0;
+    uint32_t packets = 0;
+    uint32_t lastSeq = 0;
+    char callsign[20] = "";
+    char targetCall[20] = "";
+    char name[32] = "";
+    char location[48] = "";
+};
+
+static CallInfo callInfo;
+static SemaphoreHandle_t callInfoMutex = nullptr;
+
+static volatile uint32_t lookupRequestedId = 0;
+static volatile bool lookupPending = false;
+static TaskHandle_t lookupTaskHandle = nullptr;
+
+static unsigned long lastUiDraw = 0;
+static unsigned long lastVoicePacketMs = 0;
+
+
+s
