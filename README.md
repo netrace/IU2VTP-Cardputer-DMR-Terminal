@@ -1,90 +1,52 @@
 # IU2VTP Cardputer DMR Terminal
 
-A strictly **receive-only DMR-over-IP terminal** for the **M5Stack Cardputer / StampS3**.
+A compact **DMR-over-IP RX/TX terminal** for the **M5Stack Cardputer / StampS3**.
 
-It connects to compatible Open DMR Terminal Protocol / Rewind servers, authenticates, subscribes to a selected talkgroup, receives DMR audio, decodes AMBE+2, and plays the resulting PCM audio through the Cardputer speaker.
-
-The project is designed as a compact portable DMR listening terminal with on-device configuration, multiple DMR server profiles, favorite talkgroups, Wi-Fi setup, live caller metadata, and a small UI optimized for the Cardputer keyboard.
-
-> **Important:** this firmware is intentionally RX-only. It does not implement PTT, microphone capture, DMR voice transmission, voice headers, or voice terminators.
-
----
+It connects to compatible Open DMR Terminal Protocol / Rewind servers, authenticates, subscribes to a selected talkgroup, receives and decodes DMR audio, and can transmit live microphone audio with hold-to-talk PTT.
 
 ## Features
 
-- Strictly receive-only DMR operation
-- Open DMR Terminal Protocol / Rewind support
-- UDP control-plane authentication
-- Group Voice talkgroup subscription
+- Open DMR Terminal Protocol / Rewind
+- BrandMeister and HamThings profile templates
+- Group voice RX/TX
+- Private-call TX by DMR ID
+- Physical **G0 / BtnA** hold-to-talk PTT
+- Keyboard **P** fallback PTT
+- **C** toggles GROUP / PRIVATE TX mode
+- **I** edits the private destination DMR ID
+- Favorite talkgroups and direct TG entry
+- Persistent current TG
 - Multiple DMR server profiles
-- Single-profile operation supported
-- Favorite talkgroups
-- Direct TG entry
-- Persistent current TG across reboots
-- On-device Wi-Fi scan and setup
-- Persistent Wi-Fi configuration
+- On-device Wi-Fi setup
 - Adjustable speaker volume
 - Live caller / destination metadata
 - RadioID.net caller lookup
-- Shared UI framework with centralized navigation
-- en-US user interface
-- M5Stack Cardputer speaker output
-- Optimized classic mbelib AMBE+2 decode path
+- Half-duplex speaker/microphone handling
+- Classic mbelib RX decode
+- Embedded Rust `blip25-vocoder` AMBE+2 TX backend
 
----
+## Hardware
 
-## Supported hardware
+- M5Stack Cardputer
+- StampS3 / ESP32-S3
 
-Current target:
+Built with PlatformIO + Arduino.
 
-- **M5Stack Cardputer**
-- **StampS3 / ESP32-S3**
-
-The project is built with PlatformIO using the Arduino framework.
-
----
-
-## Build environment
-
-Recommended `platformio.ini`:
-
-```ini
-[env:m5stack-stamps3]
-platform = espressif32
-board = m5stack-stamps3
-framework = arduino
-
-monitor_speed = 115200
-upload_speed = 1500000
-
-build_flags =
-    -DARDUINO_USB_CDC_ON_BOOT=1
-    -DARDUINO_USB_MODE=1
-```
-
-Build:
+## Build
 
 ```bash
-pio run
+pio run -e m5stack-stamps3
 ```
 
 Upload:
 
 ```bash
-pio run -t upload
+pio run -e m5stack-stamps3 -t upload
 ```
 
-Firmware output:
-
-```text
-.pio/build/m5stack-stamps3/firmware.bin
-```
-
----
+The build helper can bootstrap/link the Rust AMBE encoder backend for ESP32-S3.
 
 ## First-time setup
-
-The setup flow is:
 
 ```text
 Wi-Fi
@@ -93,18 +55,10 @@ DMR Server
   ↓
 Talkgroup
   ↓
-RX
+RX / PTT
 ```
 
-You may configure only one DMR profile.
-
-For example, HamThings can be the only configured profile while BrandMeister remains unused or is deleted.
-
----
-
-## Default DMR server templates
-
-The firmware currently ships with templates for:
+Default server templates:
 
 ### BrandMeister
 
@@ -120,103 +74,70 @@ UDP 54006
 UDP 54006
 ```
 
-These are templates only. They are not mandatory.
+These are editable templates, not mandatory services.
 
----
-
-## RX controls
-
-On the main RX screen:
+## Main controls
 
 ```text
 UP / DOWN       Previous / next favorite TG
 LEFT / RIGHT    Previous / next ready DMR server
 ENTER           Direct TG entry
+G0 / BtnA       Hold-to-talk PTT
+P               Keyboard fallback PTT
+C               Toggle GROUP / PRIVATE TX
+I               Enter private destination DMR ID
 M               Settings
 ```
 
-General UI:
+Private-call mode is independent of the current group talkgroup: changing TX mode does not alter the active RX/group TG.
+
+## RX audio pipeline
 
 ```text
-ENTER           Open / confirm
-ESC             Back / cancel
-DEL             Delete character
+ODTP 0x0920 payload
+→ 3 × 9-byte DMR AMBE+2 frames
+→ rW/rX/rY/rZ deinterleave
+→ classic mbelib
+→ 160 PCM samples/frame
+→ 8 kHz mono
+→ Cardputer speaker
 ```
 
-On the Cardputer, directional actions use the existing FN-based key combinations handled by the firmware.
+The RX path is known-good and should remain isolated from unrelated TX/UI work.
 
----
-
-## DMR connection states
-
-The UI distinguishes transport/login state from talkgroup subscription state.
-
-Typical states include:
+## TX audio pipeline
 
 ```text
-LOGIN
-AUTH
-AUTH OK
-TG...
-READY
+G0 / PTT
+→ Cardputer microphone 16 kHz
+→ 2:1 downsample to 8 kHz / 160 samples
+→ blip25 AMBE+2 encoder
+→ DMR 72-bit rW/rX/rY/rZ interleave
+→ 3 × 9-byte frames
+→ 27-byte ODTP audio payload
+→ Rewind UDP
 ```
 
-When changing talkgroups, the server connection remains active. The UI may show:
+TX is half-duplex. Speaker playback is stopped while the microphone owns the shared audio peripheral.
+
+## Verified ODTP TX sequence
+
+The working call flow was validated against live Open DMR Terminal servers:
 
 ```text
-Switching TG...
-Waiting for TG confirmation
+0x0911  DMR Voice LC Header
+0x0911  DMR Voice LC Header
+0x0920  DMR Audio (27 bytes)
+0x0920  DMR Audio (27 bytes)
+...
+0x0912  DMR Terminator
 ```
 
-instead of incorrectly reporting that the DMR connection itself is being re-established.
+The 12-byte Voice LC contains the group/private FLCO, destination ID, source DMR ID and RS(12,9) parity with the DMR Voice-LC mask.
 
----
+A Rewind `0x0928 SUPERHEADER` is useful for RX metadata but is **not** used to start the working TX call path.
 
-## Current TG persistence
-
-The actual RX talkgroup is stored independently of the selected favorite-TG index.
-
-NVS key:
-
-```text
-currenttg
-```
-
-This means that if you enter a TG directly with `ENTER`, that talkgroup is restored after reboot and used for the next ODTP subscription.
-
----
-
-## UI architecture
-
-The UI uses a centralized navigation framework.
-
-Core navigation functions:
-
-```cpp
-navigateTo(...)
-navigateBack(...)
-resetNavigation(...)
-renderCurrentScreen()
-```
-
-Transient text-input state is kept separate from the navigation stack.
-
-Shared visual components include:
-
-```cpp
-drawAppHeader()
-drawFooter(...)
-drawScreenBase()
-drawScreenChrome(...)
-```
-
-This avoids duplicated header/footer logic across screens and reduces redraw inconsistencies.
-
----
-
-## DMR protocol notes
-
-The project uses the Rewind / Open DMR Terminal Protocol framing.
+## Rewind transport
 
 Packet header:
 
@@ -228,173 +149,92 @@ sequence          uint32 little-endian
 payload length    uint16 little-endian
 ```
 
-Relevant packet types include:
+Important types:
 
 ```text
-0x0000  KEEPALIVE
-0x0002  CHALLENGE
-0x0003  AUTHENTICATION
-0x0901  SUBSCRIPTION
-0x0902  CANCELLING
-0x0911  DMR HEADER FLC
-0x0912  DMR TERMINATOR
-0x0920  DMR AUDIO
-0x0928  SUPERHEADER
+0x0000 KEEPALIVE
+0x0002 CHALLENGE
+0x0003 AUTHENTICATION
+0x0900 CONFIGURATION
+0x0901 SUBSCRIPTION
+0x0902 CANCELLING
+0x0911 DMR HEADER FLC
+0x0912 DMR TERMINATOR
+0x0920 DMR AUDIO
+0x0928 SUPERHEADER
+0x0929 FAILURE
 ```
 
-Authentication uses:
+Authentication:
 
 ```text
 SHA-256(raw challenge + hotspot password)
 ```
 
-The expected high-level flow is:
+## PTT safety / runtime behavior
 
-```text
-KEEPALIVE
-→ CHALLENGE
-→ AUTHENTICATION
-→ KEEPALIVE ACK
-→ SUBSCRIPTION
-→ SUBSCRIPTION ACK
-→ DMR AUDIO
-```
+- hold-to-talk only; no toggle PTT
+- PTT allowed only when the DMR session is ready
+- group TX targets the current TG
+- private TX requires a valid destination DMR ID
+- server/TG switching is blocked during TX
+- BUSY / FAILURE / network loss aborts TX
+- forced abort latches PTT until physical release
+- maximum continuous TX timeout: 3 minutes
+- RX queue is suppressed/reset around TX to keep operation half-duplex
 
----
+## AMBE+2 encoder
 
-## Audio pipeline
+TX uses the MIT-licensed `OpenBLIP25/blip25-vocoder` half-rate 3600×2450 codec through a Rust static library and C ABI.
 
-The audio path is intentionally conservative because it is already known-good.
-
-Pipeline:
-
-```text
-ODTP DMR audio packet
-→ 3 × 9-byte AMBE+2 frames
-→ DMR deinterleave
-→ classic mbelib decode
-→ 160 PCM samples/frame
-→ 8 kHz mono PCM
-→ Cardputer speaker
-```
-
-The working DMR deinterleave is based on the `rW/rX/rY/rZ` mapping.
-
-The audio path should be treated as a protected subsystem unless there is a specific audio bug being investigated.
-
----
-
-## RX-only safety boundary
-
-This project must remain receive-only.
-
-Allowed outbound traffic:
-
-- authentication
-- keepalive
-- talkgroup subscription
-- subscription cancellation
-- other minimal ODTP control-plane traffic required to receive audio
-
-Not allowed:
-
-- microphone capture
-- PTT
-- AMBE encode
-- DMR voice packet generation
-- DMR voice transmission
-- DMR voice headers for transmission
-- DMR voice terminators for transmission
-- any transmit-mode UI or hardware path
-
-Contributions that add a DMR audio TX path are outside the scope of this project.
-
----
-
-## Caller metadata
-
-The firmware can use metadata from:
-
-- DMR FLC packets
-- Rewind SUPERHEADER packets
-
-SUPERHEADER fields include source and destination IDs plus source/target callsigns.
-
-Optional RadioID.net lookup may provide:
-
-- callsign
-- first name
-- surname
-- city
-- state
-- country
-
----
+See [docs/AMBE_ENCODER.md](docs/AMBE_ENCODER.md) for implementation and patent-notice details.
 
 ## Project structure
-
-Typical layout:
 
 ```text
 .
 ├── platformio.ini
 ├── README.md
 ├── AGENTS.md
-├── .github/
-│   └── copilot-instructions.md
-└── src/
-    └── main.cpp
+├── STEERING.md
+├── codec/blip25_ffi/
+├── docs/
+├── include/
+├── scripts/
+├── src/
+└── tools/
 ```
 
----
+## Development guidance
 
-## Development rules
+Read:
 
-Before changing code, please read:
+- [AGENTS.md](AGENTS.md)
+- [STEERING.md](STEERING.md)
+- [.github/copilot-instructions.md](.github/copilot-instructions.md)
 
-- [`AGENTS.md`](AGENTS.md)
-- [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
-
-These files document the architectural constraints, RX-only boundary, UI conventions, and the known-good audio path.
-
----
+The central rule is now: **preserve the verified RX and TX protocol/audio paths unless a change specifically targets them**.
 
 ## Current release
 
-Current development baseline:
-
 ```text
-v1.0.3
+v1.1.0
 ```
 
-Key recent work:
-
-- centralized navigation framework
-- shared header/footer components
-- en-US UI
-- single-profile DMR support
-- persistent actual RX talkgroup
-- improved DMR state display
-- transient input-state cleanup
-
----
+v1.1.0 adds live ODTP PTT transmission, group/private TX modes, physical G0 PTT, embedded AMBE+2 encode, verified Voice-LC call setup, pacing, half-duplex audio handling and TX failure/timeout handling.
 
 ## Status
 
-This is an experimental amateur-radio software project under active development.
+Active amateur-radio software project. Test carefully after changes to:
 
-Test carefully after changes, especially around:
-
-- boot / Wi-Fi reconnection
-- profile selection
-- talkgroup switching
-- navigation transitions
-- direct TG entry
-- DMR authentication
-- subscription ACK handling
-- audio playback continuity
-
----
+- DMR authentication/subscription
+- RX audio continuity
+- PTT press/release
+- Voice-LC call setup
+- group/private destination handling
+- network pacing
+- Wi-Fi loss / BUSY / FAILURE aborts
+- speaker restoration after TX
 
 ## Author
 
