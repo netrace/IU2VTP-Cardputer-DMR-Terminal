@@ -1,0 +1,112 @@
+name: Publish v1.1.1
+
+on:
+  workflow_run:
+    workflows: ["Build Cardputer DMR Terminal"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  TARGET_SHA: 79ee6b07ad309569138d9c30f3548ac3fed02954
+  TAG: v1.1.1
+  EXPECTED_RUN_ID: "35932983947"
+
+jobs:
+  release:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_sha == '79ee6b07ad309569138d9c30f3548ac3fed02954' &&
+       github.event.workflow_run.id == 35932983947)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+
+      - name: Create annotated tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists"
+          else
+            git tag -a "${TAG}" "${TARGET_SHA}" -m "v1.1.1 - TX buffer drain and RX PTT interlock"
+            git push origin "${TAG}"
+          fi
+
+      - name: Download validated v1.1.1 firmware artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-assets
+          gh run download "${EXPECTED_RUN_ID}" \
+            --repo "${{ github.repository }}" \
+            --name cardputer-v1.1.1 \
+            --dir release-assets
+          ls -lh release-assets
+
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## IU2VTP Cardputer DMR Terminal v1.1.1
+
+          Maintenance release focused on safer and cleaner PTT behavior.
+
+          ### Fixed
+          - Drain all captured PCM frames when PTT is released.
+          - Encode and transmit queued microphone audio before sending the DMR terminator.
+          - Preserve the final 1-2 AMBE frames and pad only the missing tail with the known DMR silence frame.
+          - Fully reset PCM, DMR packet, and partial-frame buffers after TX so stale speech cannot leak into the next PTT.
+          - Block PTT while RX traffic is active.
+          - RX busy detection uses both live call state and a 1.5-second recent-voice guard.
+          - Fail closed if RX call-state locking cannot be inspected safely.
+
+          ### TX call flow
+          ```text
+          0x0911 Voice LC
+          0x0911 Voice LC
+          0x0920 DMR audio
+          ...
+          0x0912 Terminator
+          ```
+
+          ### Base
+          Includes all v1.1.0 live ODTP RX/TX functionality:
+          group/private TX, physical G0 PTT, embedded AMBE+2 encode, half-duplex audio handling, pacing, and failure/timeout protection.
+          EOF
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+          else
+            gh release create "${TAG}" \
+              release-assets/IU2VTP_Cardputer_DMR_Terminal_v1.1.1.bin \
+              release-assets/IU2VTP_Cardputer_DMR_Terminal_v1.1.1.bin.sha256 \
+              --repo "${{ github.repository }}" \
+              --target "${TARGET_SHA}" \
+              --title "v1.1.1 - TX buffer drain and RX PTT interlock" \
+              --notes-file RELEASE_NOTES.md
+          fi
+
+      - name: Remove one-shot workflow
+        if: success()
+        run: |
+          git fetch origin main
+          git checkout -B cleanup origin/main
+          rm -f .github/workflows/release-v1.1.1.yml
+          git add .github/workflows/release-v1.1.1.yml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Remove v1.1.1 release workflow"
+          git push origin cleanup:main
