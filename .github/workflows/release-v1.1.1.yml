@@ -1,6 +1,10 @@
 name: Publish v1.1.1
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-v1.1.1.yml"
   workflow_run:
     workflows: ["Build Cardputer DMR Terminal"]
     types: [completed]
@@ -19,6 +23,7 @@ jobs:
   release:
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_sha == '3ff4871c6d39900d60a5f1af0cfdc9372d1d6f0c' &&
        github.event.workflow_run.id == 35933229923)
@@ -30,15 +35,16 @@ jobs:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 0
 
-      - name: Create annotated tag
+      - name: Create release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+          if gh api "repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
             echo "Tag ${TAG} already exists"
           else
-            git tag -a "${TAG}" "${TARGET_SHA}" -m "v1.1.1 - TX buffer drain and RX PTT interlock"
-            git push origin "${TAG}"
+            gh api --method POST "repos/${{ github.repository }}/git/refs" \
+              -f ref="refs/tags/${TAG}" \
+              -f sha="${TARGET_SHA}"
           fi
 
       - name: Download validated v1.1.1 firmware artifact
