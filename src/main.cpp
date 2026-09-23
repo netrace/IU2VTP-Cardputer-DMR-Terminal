@@ -345,6 +345,7 @@ static void drawWifiHome();
 static void drawWifiScan();
 static void drawVolumeMenu();
 static void drawInputBox();
+static void abortTxSession(const char* reason);
 
 // ------------------------------------------------------------
 // Persistent settings
