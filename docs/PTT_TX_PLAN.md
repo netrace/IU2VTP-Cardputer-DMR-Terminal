@@ -1,238 +1,89 @@
-# PTT / TX Development Plan
+# PTT / TX Implementation Notes
 
-Branch: `feature/ptt-tx`
+Target release: **v1.1.0**
 
-Target version: `v1.1.0`
+## Status
 
-## Goal
+Live PTT/TX is implemented and validated against Open DMR Terminal servers.
 
-Add push-to-talk DMR transmission while preserving the existing stable receive
-pipeline.
+Verified:
+- physical G0 / BtnA hold-to-talk
+- keyboard P fallback
+- Cardputer microphone capture
+- 16 kHz → 8 kHz downsample
+- embedded blip25 AMBE+2 encoder
+- DMR 72-bit interleave
+- 27-byte ODTP voice payloads
+- network pacing
+- group TX
+- private TX
+- Voice-LC call setup
+- terminator handling
+- Last Heard visibility
+- live voice audio
+- half-duplex speaker/microphone switching
 
-The current RX path must remain functionally isolated:
+## TX pipeline
 
 ```text
-ODTP DMR audio
-→ DMR deinterleave
-→ classic mbelib
-→ PCM 8 kHz
-→ Cardputer speaker
-```
-
-TX is implemented as a separate subsystem.
-
-## Planned TX pipeline
-
-```text
-PTT key
-→ microphone capture
-→ PCM normalization / 8 kHz mono
-→ AMBE+2 encoder
-→ DMR interleave
+PTT
+→ mic 16 kHz
+→ 8 kHz / 160 PCM samples
+→ AMBE+2 encode
+→ DMR rW/rX/rY/rZ interleave
 → 3 × 9-byte AMBE frames
-→ 27-byte ODTP DMR audio payload
-→ Rewind / ODTP TX
+→ 27-byte ODTP 0x0920 payload
+→ UDP
 ```
 
-## Development phases
+## Verified call sequence
 
-### ✅ v1.1.0-alpha1 — PTT state machine
-
-No DMR voice packets are transmitted.
-
-- Hold `P` on the RX screen to enter PTT test state.
-- Release `P` to return to RX.
-- UI shows a red PTT test state and elapsed time.
-- PTT is accepted only when the DMR session is ready.
-- The existing voice-packet TX guard remains active.
-- No microphone capture.
-- No AMBE encoder.
-- No DMR voice/header/terminator transmission.
-
-Purpose: validate key handling, press/release semantics, UI, and TX state
-ownership without transmitting anything.
-
-### ✅ v1.1.0-alpha2 — microphone pipeline
-
-Implemented:
-- hold P starts Cardputer microphone capture;
-- speaker is stopped while the shared audio peripheral is used by the mic;
-- double-buffer capture at 16 kHz mono;
-- 320-sample / 20 ms input blocks;
-- explicit 2:1 downsample to 160-sample / 8 kHz PCM frames;
-- non-blocking PCM queue;
-- peak, queue-drop and record-failure counters;
-- speaker restored on PTT release;
-- still no DMR voice TX.
-
-### ✅ v1.1.0-alpha3 — AMBE encode validation
-
-Current alpha3 work:
-
-- stable embedded interface: 160 PCM samples at 8 kHz -> 9 AMBE bytes;
-- ESP32 backend deliberately reports unavailable for now;
-- host reference tool uses MIT-licensed `blip25-vocoder`;
-- host CI verifies PCM -> half-rate AMBE+2 code vectors -> FEC decode -> PCM;
-- no network voice TX.
-
-The earlier OpenDMR/OP25 candidate is GPL and is therefore not being vendored
-into this MIT project.
-
-Completed: the Rust/FFI backend cross-builds for `xtensa-esp32s3-espidf`, links into the PlatformIO Cardputer firmware, and passes host/C-ABI round-trip tests. The upstream patent notice remains documented.
-
-### ✅ v1.1.0-alpha4 — DMR framing
-
-Add a TX-side DMR interleave/framing module.
-
-Input:
+Reverse engineering and live testing established the working ODTP transmit sequence:
 
 ```text
-3 × canonical 9-byte AMBE frames
+0x0911 Voice LC
+0x0911 Voice LC
+0x0920 audio
+0x0920 audio
+...
+0x0912 terminator
 ```
 
-Output:
+A SUPERHEADER-only call opener was rejected by live servers.
+
+Voice LC is 12 bytes:
+- FLCO 0x00 for group voice
+- FLCO 0x03 for private voice
+- FID 0
+- service options 0
+- destination DMR ID, 24-bit big-endian
+- source DMR ID, 24-bit big-endian
+- RS(12,9) parity masked with 0x96
+
+## Controls
 
 ```text
-one 27-byte ODTP audio payload
+G0 / BtnA   Hold-to-talk
+P           Keyboard fallback PTT
+C           GROUP / PRIVATE
+I           Private DMR ID
 ```
 
-Do not reuse RX deinterleave code by reversing assumptions implicitly. Keep
-explicit TX mapping and tests.
+Group/private mode switching is independent from the current group TG.
 
-### 🚧 v1.1.0-alpha5 — Rewind / ODTP voice TX
+## Runtime protection
 
-Implemented on the feature branch:
+- PTT requires a ready DMR session
+- half-duplex RX suppression during TX
+- BUSY / FAILURE abort
+- Wi-Fi/network-loss abort
+- max TX duration
+- re-key latch after forced abort
+- TG/server changes blocked during TX
+- speaker restored after microphone shutdown
 
-- group-voice SUPERHEADER start (32-byte payload);
-- independent realtime sequence space;
-- REAL_TIME_1 packet flag;
-- 27-byte DMR audio packets;
-- ~60 ms network pacing;
-- empty DMR terminator on PTT release;
-- half-duplex RX suppression while transmitting;
-- server BUSY / FAILURE abort;
-- network-loss abort;
-- maximum continuous TX timeout;
-- TG/server switching blocked while PTT is active;
-- re-key latch after forced abort.
+## Encoder
 
-Still to validate on-air / against a live Open DMR Terminal server:
+The embedded backend uses `OpenBLIP25/blip25-vocoder` through the Rust/C ABI bridge in `codec/blip25_ffi`.
 
-- exact audio bit ordering expected in the TX direction;
-- server acceptance of the generated AMBE payload;
-- practical call-start / call-end behavior;
-- audio quality and latency.
-
-## Proposed code boundaries
-
-TX logic should move out of the monolithic UI/network path as it grows.
-
-Suggested interfaces:
-
-```cpp
-class TxSession;
-class TxAudioCapture;
-class AmbeEncoder;
-class DmrTxFramer;
-class RewindTx;
-```
-
-The main loop should only coordinate the TX state machine.
-
-## State model
-
-Initial alpha:
-
-```text
-IDLE
-  │ hold P
-  ▼
-PTT_HELD_TEST
-  │ release P
-  ▼
-IDLE
-```
-
-Later:
-
-```text
-IDLE
-→ TX_PREPARE
-→ TX_ACTIVE
-→ TX_ENDING
-→ IDLE
-```
-
-Failure paths always return to `IDLE`.
-
-## Safety / regression rules
-
-During early alphas, the existing guard in `sendControl()` must continue to
-reject:
-
-- DMR audio
-- DMR header FLC
-- DMR terminator
-- DMR embedded
-- SUPERHEADER
-
-The guard is removed or narrowed only in the specific alpha where verified
-Rewind TX is intentionally enabled.
-
-Do not modify the known-good RX AMBE decode/deinterleave pipeline as part of
-PTT work.
-
-## PTT UX
-
-Alpha1 mapping:
-
-```text
-Hold P      PTT test
-Release P   return to RX
-```
-
-Final key mapping can be revisited after testing ergonomics on the physical
-Cardputer.
-
-PTT must be hold-to-talk, not a toggle.
-
-## Before first live transmission
-
-Required checklist:
-
-- encoder licensing resolved
-- exact Rewind TX framing verified
-- group TG source/destination verified
-- packet pacing verified
-- header/terminator verified
-- maximum continuous TX timeout
-- release always terminates TX
-- network loss terminates TX
-- profile/TG changes blocked while transmitting
-- RX audio muted or stopped during TX where necessary
-
-
-## TX AMBE byte ordering validation
-
-The Rewind/Open Terminal bridge implementation that forwards 9-byte frames
-verbatim obtains those bytes from DroidStar's DMR-specific
-`mbe_vocoder_encode_dmr()`. Therefore its input is already in DMR frame
-ordering.
-
-Our MIT `blip25-vocoder` backend instead emits canonical half-rate code-vector
-bits. The feature branch intentionally converts those canonical 72 bits through
-the proven DMR `rW/rX/rY/rZ` mapping before assembling the 27-byte Rewind
-audio payload. This is symmetric with the known-good RX deinterleave path.
-
-
-### 🚧 v1.1.0-alpha6 — Group / Private TX
-
-- Physical G0 / BtnA is the primary hold-to-talk control.
-- Keyboard P remains as a fallback/debug PTT.
-- Group TX uses session type 7 and the currently selected talkgroup.
-- Private TX uses session type 5 and a user-entered DMR ID.
-- C toggles GROUP / PRIVATE mode on the main screen.
-- I opens private DMR ID entry.
-- Private PTT is blocked until a valid destination DMR ID is set.
-- The Rewind framing host test validates both group and private SUPERHEADER layouts.
-- Live on-air validation remains required.
+See `docs/AMBE_ENCODER.md`.
