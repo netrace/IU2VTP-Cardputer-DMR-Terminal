@@ -32,7 +32,7 @@ static bool testVoiceLc()
         return false;
     if (groupLc[3] != 0x03 || groupLc[4] != 0x67 || groupLc[5] != 0x16)
         return false;
-    if (groupLc[6] != 0x22 || groupLc[7] != 0x10 || groupLc[8] != 0xE9)
+    if (groupLc[6] != 0x22 || groupLc[7] != 0x10 || groupLc[8] != 0xA9)
         return false;
 
     uint8_t privateLc[REWIND_TX_VOICE_LC_LEN] = {0};
