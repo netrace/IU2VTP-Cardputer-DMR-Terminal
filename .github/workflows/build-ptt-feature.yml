@@ -38,3 +38,21 @@ jobs:
 
       - name: AMBE Rust C-ABI backend tests
         run: cargo test --release --manifest-path codec/blip25_ffi/Cargo.toml
+
+
+  rust-xtensa:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Xtensa Rust toolchain
+        uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+
+      - name: Build AMBE staticlib for ESP32-S3
+        run: |
+          cargo build --release             --target xtensa-esp32s3-espidf             --manifest-path codec/blip25_ffi/Cargo.toml
