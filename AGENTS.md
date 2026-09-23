@@ -1,3 +1,7 @@
+# feature/ptt-tx branch override
+
+This branch intentionally develops experimental PTT/TX support. The RX-only rule below remains the production rule for `main`, but on this branch TX work is allowed only through a separate, explicitly gated subsystem. Preserve the known-good RX audio path. Until the verified Rewind TX phase, `sendControl()` must continue blocking DMR voice/header/terminator transmission.
+
 # AGENTS.md
 
 This file contains mandatory project guidance for coding agents and contributors working on **IU2VTP Cardputer DMR Terminal**.
