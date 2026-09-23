@@ -11,6 +11,7 @@ on:
       - "scripts/**"
       - "platformio.ini"
       - "tools/ambe_ref/**"
+      - "tools/dmr_mapping_test.cpp"
       - "codec/blip25_ffi/**"
       - ".github/workflows/build-ptt-feature.yml"
   workflow_dispatch:
@@ -32,6 +33,13 @@ jobs:
 
       - name: Build Cardputer safe backend
         run: pio run -e m5stack-stamps3
+
+      - name: DMR AMBE mapping host test
+        run: |
+          g++ -std=c++17 -Iinclude \
+            tools/dmr_mapping_test.cpp src/dmr_ambe_mapping.cpp \
+            -o /tmp/dmr_mapping_test
+          /tmp/dmr_mapping_test
 
       - name: AMBE+2 host reference round-trip
         run: cargo run --release --manifest-path tools/ambe_ref/Cargo.toml
