@@ -30,7 +30,7 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
 
-      - name: Build Cardputer
+      - name: Build Cardputer safe backend
         run: pio run -e m5stack-stamps3
 
       - name: AMBE+2 host reference round-trip
@@ -38,7 +38,6 @@ jobs:
 
       - name: AMBE Rust C-ABI backend tests
         run: cargo test --release --manifest-path codec/blip25_ffi/Cargo.toml
-
 
   rust-xtensa:
     runs-on: ubuntu-latest
@@ -55,8 +54,16 @@ jobs:
 
       - name: Build AMBE staticlib for ESP32-S3
         run: |
-          cargo build --release             --target xtensa-esp32s3-espidf             --manifest-path codec/blip25_ffi/Cargo.toml
+          cargo build -Zbuild-std=std,panic_abort --release \
+            --target xtensa-esp32s3-espidf \
+            --manifest-path codec/blip25_ffi/Cargo.toml
 
+      - name: Upload ESP32-S3 AMBE staticlib
+        uses: actions/upload-artifact@v4
+        with:
+          name: ambe-rust-esp32s3
+          path: codec/blip25_ffi/target/xtensa-esp32s3-espidf/release/libiu2vtp_blip25_ffi.a
+          if-no-files-found: error
 
   firmware-rust-backend:
     needs: rust-xtensa
