@@ -1332,6 +1332,17 @@ void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
 static bool sendRealtime(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
 {
     const uint32_t seq = realtimeSeqNo++;
+    if (type != PKT_DMR_AUDIO || seq < 8) {
+        Serial.printf("[TX RT] type=0x%04X flags=0x%04X seq=%lu len=%u",
+                      type, REWIND_FLAG_REAL_TIME_1,
+                      (unsigned long)seq, payloadLen);
+        if (payload && payloadLen) {
+            Serial.print(" payload=");
+            printHex(payload, payloadLen);
+        } else {
+            Serial.println();
+        }
+    }
     const bool ok = sendRewindPacket(type, REWIND_FLAG_REAL_TIME_1,
                                      seq, payload, payloadLen);
     if (!ok) {
@@ -1350,16 +1361,14 @@ static bool sendTxVoiceHeaders()
                          txDestinationId(),
                          txCallMode == TxCallMode::PRIVATE);
 
-    // Z3DMR sends the Voice LC Header twice before voice frames.
-    for (int i = 0; i < 2; ++i) {
-        if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
-            return false;
-    }
+    if (!sendRealtime(PKT_DMR_HEADER_FLC, payload, sizeof(payload)))
+        return false;
 
-    Serial.printf("[PTT/TX] VOICE LC x2 mode=%s src=%lu dst=%lu\n",
+    Serial.printf("[PTT/TX] VOICE LC mode=%s src=%lu dst=%lu payload=",
                   txCallModeLabel(),
                   (unsigned long)profileRadioId(),
                   (unsigned long)txDestinationId());
+    printHex(payload, sizeof(payload));
     return true;
 }
 
