@@ -1,0 +1,195 @@
+# PTT / TX Development Plan
+
+Branch: `feature/ptt-tx`
+
+Target version: `v1.1.0`
+
+## Goal
+
+Add push-to-talk DMR transmission while preserving the existing stable receive
+pipeline.
+
+The current RX path must remain functionally isolated:
+
+```text
+ODTP DMR audio
+→ DMR deinterleave
+→ classic mbelib
+→ PCM 8 kHz
+→ Cardputer speaker
+```
+
+TX is implemented as a separate subsystem.
+
+## Planned TX pipeline
+
+```text
+PTT key
+→ microphone capture
+→ PCM normalization / 8 kHz mono
+→ AMBE+2 encoder
+→ DMR interleave
+→ 3 × 9-byte AMBE frames
+→ 27-byte ODTP DMR audio payload
+→ Rewind / ODTP TX
+```
+
+## Development phases
+
+### v1.1.0-alpha1 — PTT state machine
+
+No DMR voice packets are transmitted.
+
+- Hold `P` on the RX screen to enter PTT test state.
+- Release `P` to return to RX.
+- UI shows a red PTT test state and elapsed time.
+- PTT is accepted only when the DMR session is ready.
+- The existing voice-packet TX guard remains active.
+- No microphone capture.
+- No AMBE encoder.
+- No DMR voice/header/terminator transmission.
+
+Purpose: validate key handling, press/release semantics, UI, and TX state
+ownership without transmitting anything.
+
+### v1.1.0-alpha2 — microphone pipeline
+
+- Start/stop microphone capture from the PTT state.
+- Produce deterministic PCM buffers.
+- Normalize to the format required by the encoder.
+- Measure capture latency and buffer overruns.
+- Still no DMR voice TX.
+
+### v1.1.0-alpha3 — AMBE encode validation
+
+Introduce an encoder behind a narrow interface:
+
+```cpp
+bool encodeAmbeFrame(const int16_t pcm160[160], uint8_t ambe9[9]);
+```
+
+Validate locally by decoding generated AMBE frames through the known-good RX
+decoder before any network transmission.
+
+Licensing of the selected encoder implementation must be resolved before it is
+incorporated into the MIT-licensed repository.
+
+### v1.1.0-alpha4 — DMR framing
+
+Add a TX-side DMR interleave/framing module.
+
+Input:
+
+```text
+3 × canonical 9-byte AMBE frames
+```
+
+Output:
+
+```text
+one 27-byte ODTP audio payload
+```
+
+Do not reuse RX deinterleave code by reversing assumptions implicitly. Keep
+explicit TX mapping and tests.
+
+### v1.1.0-alpha5 — Rewind / ODTP voice TX
+
+Only after the exact server-side sequence is verified:
+
+- call/session start
+- group/private destination semantics
+- DMR header / SUPERHEADER requirements
+- audio subtype / flag sequencing
+- 60 ms packet pacing
+- terminator
+- server ACK/failure behavior
+- busy/error handling
+
+## Proposed code boundaries
+
+TX logic should move out of the monolithic UI/network path as it grows.
+
+Suggested interfaces:
+
+```cpp
+class TxSession;
+class TxAudioCapture;
+class AmbeEncoder;
+class DmrTxFramer;
+class RewindTx;
+```
+
+The main loop should only coordinate the TX state machine.
+
+## State model
+
+Initial alpha:
+
+```text
+IDLE
+  │ hold P
+  ▼
+PTT_HELD_TEST
+  │ release P
+  ▼
+IDLE
+```
+
+Later:
+
+```text
+IDLE
+→ TX_PREPARE
+→ TX_ACTIVE
+→ TX_ENDING
+→ IDLE
+```
+
+Failure paths always return to `IDLE`.
+
+## Safety / regression rules
+
+During early alphas, the existing guard in `sendControl()` must continue to
+reject:
+
+- DMR audio
+- DMR header FLC
+- DMR terminator
+- DMR embedded
+- SUPERHEADER
+
+The guard is removed or narrowed only in the specific alpha where verified
+Rewind TX is intentionally enabled.
+
+Do not modify the known-good RX AMBE decode/deinterleave pipeline as part of
+PTT work.
+
+## PTT UX
+
+Alpha1 mapping:
+
+```text
+Hold P      PTT test
+Release P   return to RX
+```
+
+Final key mapping can be revisited after testing ergonomics on the physical
+Cardputer.
+
+PTT must be hold-to-talk, not a toggle.
+
+## Before first live transmission
+
+Required checklist:
+
+- encoder licensing resolved
+- exact Rewind TX framing verified
+- group TG source/destination verified
+- packet pacing verified
+- header/terminator verified
+- maximum continuous TX timeout
+- release always terminates TX
+- network loss terminates TX
+- profile/TG changes blocked while transmitting
+- RX audio muted or stopped during TX where necessary
