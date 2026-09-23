@@ -2465,7 +2465,8 @@ static void commitTextInput()
 
 static bool pttKeyDown()
 {
-    return M5Cardputer.Keyboard.isKeyPressed('p') ||
+    return M5Cardputer.BtnA.isPressed() ||
+           M5Cardputer.Keyboard.isKeyPressed('p') ||
            M5Cardputer.Keyboard.isKeyPressed('P');
 }
 
