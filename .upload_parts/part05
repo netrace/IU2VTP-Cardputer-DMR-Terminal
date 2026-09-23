@@ -1,0 +1,476 @@
+dioId = (uint32_t)inputBuffer.toInt();
+            if (field == 3) snprintf(p.password, sizeof(p.password), "%s", inputBuffer.c_str());
+            saveSettings();
+        }
+        uiMode = inputReturnMode;
+        renderCurrentScreen();
+        return;
+    }
+}
+
+static void handleKeyboard()
+{
+    if (!M5Cardputer.Keyboard.isChange() ||
+        !M5Cardputer.Keyboard.isPressed()) return;
+
+    auto ks = M5Cardputer.Keyboard.keysState();
+
+    // Text/TG input
+    if (uiMode == UiMode::TG_INPUT ||
+        uiMode == UiMode::TEXT_INPUT ||
+        uiMode == UiMode::WIFI_PASSWORD) {
+
+        bool changed = false;
+
+        if (ks.del) {
+            if (inputBuffer.length()) {
+                inputBuffer.remove(inputBuffer.length() - 1);
+                changed = true;
+            }
+        }
+
+        // ESC cancels input and always returns to the screen that opened it.
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            UiMode returnMode = inputReturnMode;
+            uiMode = returnMode;
+
+            if (returnMode == UiMode::MAIN) {
+                resetTransientInputState();
+                rxUiDirty = true;
+                lastUiDraw = 0;
+            }
+
+            renderCurrentScreen();
+            return;
+        }
+
+        if (ks.enter) {
+            if (uiMode == UiMode::TG_INPUT) inputTarget = 1000;
+            commitTextInput();
+            return;
+        }
+
+        // Cardputer text input comes through status.word.
+        // Ignore control characters; preserve printable ASCII exactly.
+        for (auto ch : ks.word) {
+            if (ch == 0) continue;
+
+            if (inputNumericOnly) {
+                if (ch >= '0' && ch <= '9' && inputBuffer.length() < 8) {
+                    inputBuffer += (char)ch;
+                    changed = true;
+                }
+            } else {
+                if (ch >= 32 && ch <= 126 && inputBuffer.length() < 64) {
+                    inputBuffer += (char)ch;
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed) {
+            Serial.printf("[INPUT] len=%u secret=%s\n",
+                          (unsigned)inputBuffer.length(),
+                          inputSecret ? "YES" : "NO");
+        }
+
+        drawInputBox();
+        return;
+    }
+
+    if (uiMode == UiMode::MAIN) {
+        if (M5Cardputer.Keyboard.isKeyPressed('m') ||
+            M5Cardputer.Keyboard.isKeyPressed('M')) {
+            menuIndex = 0;
+            navigateTo(UiMode::CONFIG_HOME);
+            return;
+        }
+
+        if (navUp() && favoriteTGCount) {
+            activeTGIndex = (activeTGIndex + favoriteTGCount - 1) % favoriteTGCount;
+            switchTalkgroup(favoriteTGs[activeTGIndex], true);
+            rxUiDirty = true;
+            lastUiDraw = 0;
+            return;
+        }
+        if (navDown() && favoriteTGCount) {
+            activeTGIndex = (activeTGIndex + 1) % favoriteTGCount;
+            switchTalkgroup(favoriteTGs[activeTGIndex], true);
+            rxUiDirty = true;
+            lastUiDraw = 0;
+            return;
+        }
+        if (navLeft()) {
+            switchProfile(-1);
+            rxUiDirty = true;
+            lastUiDraw = 0;
+            return;
+        }
+        if (navRight()) {
+            switchProfile(+1);
+            rxUiDirty = true;
+            lastUiDraw = 0;
+            return;
+        }
+        if (ks.enter) {
+            beginTgInput();
+            return;
+        }
+        return;
+    }
+
+
+
+    if (uiMode == UiMode::AUDIO_VOLUME) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            menuIndex = 4;
+            navigateBack(UiMode::CONFIG_HOME);
+            return;
+        }
+
+        if (navLeft()) {
+            setSpeakerVolume((int)speakerVolume - 10);
+            drawVolumeMenu();
+            return;
+        }
+
+        if (navRight()) {
+            setSpeakerVolume((int)speakerVolume + 10);
+            drawVolumeMenu();
+            return;
+        }
+
+        if (navUp()) {
+            setSpeakerVolume((int)speakerVolume + 1);
+            drawVolumeMenu();
+            return;
+        }
+
+        if (navDown()) {
+            setSpeakerVolume((int)speakerVolume - 1);
+            drawVolumeMenu();
+            return;
+        }
+
+        return;
+    }
+
+    if (uiMode == UiMode::WIFI_HOME) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            menuIndex = 3;
+            navigateBack(UiMode::CONFIG_HOME);
+            return;
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('c') ||
+            M5Cardputer.Keyboard.isKeyPressed('C')) {
+            WiFi.disconnect(true, false);
+            clearWifiConfig();
+            drawWifiHome();
+            return;
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('r') ||
+            M5Cardputer.Keyboard.isKeyPressed('R')) {
+            clearUiScreen();
+            M5Cardputer.Display.setTextColor(TFT_WHITE);
+            M5Cardputer.Display.setCursor(8, 40);
+            M5Cardputer.Display.print("Connecting...");
+            bool ok = connectSavedWifi(15000);
+            if (ok) {
+                routeAfterWifiConnected();
+            } else {
+                wifiHomeDirty = true;
+                drawWifiHome();
+            }
+            return;
+        }
+
+        if (ks.enter) {
+            clearUiScreen();
+            M5Cardputer.Display.setTextColor(TFT_WHITE);
+            M5Cardputer.Display.setCursor(8, 40);
+            M5Cardputer.Display.print("Scanning Wi-Fi...");
+            startWifiScan();
+            uiMode = UiMode::WIFI_SCAN;
+            wifiScanDirty = true;
+            drawWifiScan();
+            return;
+        }
+        return;
+    }
+
+    if (uiMode == UiMode::WIFI_SCAN) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            navigateBack(UiMode::WIFI_HOME);
+            return;
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('r') ||
+            M5Cardputer.Keyboard.isKeyPressed('R')) {
+            clearUiScreen();
+            M5Cardputer.Display.setTextColor(TFT_WHITE);
+            M5Cardputer.Display.setCursor(8, 40);
+            M5Cardputer.Display.print("Scanning Wi-Fi...");
+            startWifiScan();
+            wifiScanDirty = true;
+            drawWifiScan();
+            return;
+        }
+
+        if (wifiScanCount) {
+            if (navUp())
+                wifiMenuIndex = (wifiMenuIndex + wifiScanCount - 1) % wifiScanCount;
+            if (navDown())
+                wifiMenuIndex = (wifiMenuIndex + 1) % wifiScanCount;
+        }
+
+        if (ks.enter && wifiScanCount) {
+            configureSelectedWifi();
+            return;
+        }
+
+        drawWifiScan();
+        return;
+    }
+
+    if (uiMode == UiMode::CONFIG_HOME) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            navigateBack(UiMode::MAIN);
+            return;
+        }
+
+        if (navUp()) menuIndex = (menuIndex + 4) % 5;
+        if (navDown()) menuIndex = (menuIndex + 1) % 5;
+
+        if (ks.enter) {
+            switch (menuIndex) {
+                case 0: // RX
+                    if (!activeProfileReady()) {
+                        setUiNotice("Configure a DMR server first");
+                        enterProfileStep(false);
+                        return;
+                    }
+                    setupFlowActive = false;
+                    startActiveConnection();
+                    resetNavigation(UiMode::MAIN);
+                    return;
+
+                case 1:
+                    enterProfileStep(false);
+                    return;
+
+                case 2:
+                    enterTalkgroupStep(false);
+                    return;
+
+                case 3:
+                    setupFlowActive = false;
+                    navigateTo(UiMode::WIFI_HOME);
+                    return;
+
+                case 4:
+                    setupFlowActive = false;
+                    navigateTo(UiMode::AUDIO_VOLUME);
+                    return;
+            }
+        }
+
+        drawConfigHome();
+        return;
+    }
+
+    if (uiMode == UiMode::CONFIG_PROFILES) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            if (setupFlowActive) {
+                uiMode = UiMode::WIFI_HOME;
+                wifiHomeDirty = true;
+                drawWifiHome();
+            } else {
+                uiMode = UiMode::CONFIG_HOME;
+                menuIndex = 1;
+                drawConfigHome();
+            }
+            return;
+        }
+        if (profileCount) {
+            if (navUp()) menuIndex = (menuIndex + profileCount - 1) % profileCount;
+            if (navDown()) menuIndex = (menuIndex + 1) % profileCount;
+        }
+        if (M5Cardputer.Keyboard.isKeyPressed('a') ||
+            M5Cardputer.Keyboard.isKeyPressed('A')) {
+            if (profileCount < MAX_PROFILES) {
+                int i = profileCount++;
+                memset(&profiles[i], 0, sizeof(DmrProfile));
+                snprintf(profiles[i].name, sizeof(profiles[i].name), "Profile %d", i + 1);
+                profiles[i].port = DMR_DEFAULT_PORT;
+                profiles[i].enabled = true;
+                menuIndex = i;
+                saveSettings();
+            }
+        }
+        if ((M5Cardputer.Keyboard.isKeyPressed('d') ||
+             M5Cardputer.Keyboard.isKeyPressed('D')) && profileCount > 1) {
+            int del = menuIndex;
+            deleteProfileAt((uint8_t)del);
+            if (menuIndex >= profileCount) menuIndex = profileCount - 1;
+            drawProfilesMenu();
+            return;
+        }
+        if (ks.enter && profileCount) {
+            // A complete profile can be selected directly from the list.
+            // An incomplete profile opens the editor.
+            if (profileReady((uint8_t)menuIndex)) {
+                activeProfileIndex = (uint8_t)menuIndex;
+                saveSettings();
+
+                Serial.printf("[CX] Active profile: %s (%s)\n",
+                              profiles[activeProfileIndex].name,
+                              profiles[activeProfileIndex].host);
+
+                if (setupFlowActive) {
+                    enterTalkgroupStep(true);
+                } else {
+                    uiMode = UiMode::CONFIG_HOME;
+                    menuIndex = 0;
+                    drawConfigHome();
+                }
+                return;
+            }
+
+            editProfileIndex = menuIndex;
+            editFieldIndex = 0;
+            navigateTo(UiMode::CONFIG_PROFILE_EDIT);
+            return;
+        }
+        drawProfilesMenu();
+        return;
+    }
+
+    if (uiMode == UiMode::CONFIG_PROFILE_EDIT) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            menuIndex = editProfileIndex;
+            navigateBack(UiMode::CONFIG_PROFILES);
+            return;
+        }
+        if (navUp()) editFieldIndex = (editFieldIndex + 4) % 5;
+        if (navDown()) editFieldIndex = (editFieldIndex + 1) % 5;
+        if (ks.enter) {
+            DmrProfile& p = profiles[editProfileIndex];
+            if (editFieldIndex == 0)
+                beginTextInput("Profile name", p.name, false, false, 3000 + editProfileIndex * 10 + 0);
+            else if (editFieldIndex == 1)
+                beginTextInput("Host", p.host, false, false, 3000 + editProfileIndex * 10 + 1);
+            else if (editFieldIndex == 2)
+                beginTextInput("Radio ID", String(p.radioId), true, false, 3000 + editProfileIndex * 10 + 2);
+            else if (editFieldIndex == 3)
+                beginTextInput("Password", "", false, true, 3000 + editProfileIndex * 10 + 3);
+            else {
+                if (!profileReady(editProfileIndex)) {
+                    setUiNotice("Complete Host, Radio ID and Password");
+                    drawProfileEditor();
+                    return;
+                }
+
+                // The selected profile becomes active only here.
+                if (state == State::SUBSCRIBED || state == State::WAIT_SUB_ACK) {
+                    sendCancellation(activeTG);
+                }
+
+                activeProfileIndex = (uint8_t)editProfileIndex;
+                saveSettings();
+
+                Serial.printf("[CX] Active profile: %s (%s)\n",
+                              profiles[activeProfileIndex].name,
+                              profiles[activeProfileIndex].host);
+
+                if (setupFlowActive) {
+                    enterTalkgroupStep(true);
+                } else {
+                    uiMode = UiMode::CONFIG_HOME;
+                    menuIndex = 0;
+                    drawConfigHome();
+                }
+                return;
+            }
+            drawInputBox();
+            return;
+        }
+        drawProfileEditor();
+        return;
+    }
+
+    if (uiMode == UiMode::CONFIG_TGS) {
+        if (M5Cardputer.Keyboard.isKeyPressed('`')) {
+            if (setupFlowActive) {
+                enterProfileStep(true);
+            } else {
+                menuIndex = 2;
+                navigateBack(UiMode::CONFIG_HOME);
+            }
+            return;
+        }
+        if (favoriteTGCount) {
+            if (navUp()) menuIndex = (menuIndex + favoriteTGCount - 1) % favoriteTGCount;
+            if (navDown()) menuIndex = (menuIndex + 1) % favoriteTGCount;
+        }
+        if (M5Cardputer.Keyboard.isKeyPressed('a') ||
+            M5Cardputer.Keyboard.isKeyPressed('A')) {
+            if (favoriteTGCount < MAX_FAVORITE_TGS) {
+                favoriteTGs[favoriteTGCount] = 0;
+                menuIndex = favoriteTGCount++;
+                saveSettings();
+                beginTextInput("New TG", "", true, false, 2000 + menuIndex);
+                return;
+            }
+        }
+        if ((M5Cardputer.Keyboard.isKeyPressed('d') ||
+             M5Cardputer.Keyboard.isKeyPressed('D')) && favoriteTGCount > 1) {
+            int del = menuIndex;
+            for (int i = del; i < favoriteTGCount - 1; ++i) favoriteTGs[i] = favoriteTGs[i + 1];
+            favoriteTGCount--;
+            if (activeTGIndex >= favoriteTGCount) activeTGIndex = 0;
+            activeTG = favoriteTGs[activeTGIndex];
+            if (menuIndex >= favoriteTGCount) menuIndex = favoriteTGCount - 1;
+            saveSettings();
+        }
+        if (ks.enter && favoriteTGCount) {
+            if (setupFlowActive) {
+                activeTGIndex = (uint8_t)menuIndex;
+                activeTG = favoriteTGs[activeTGIndex];
+                saveSettings();  // saves both favorite index and actual current TG
+
+                setupFlowActive = false;
+                startActiveConnection();
+                resetNavigation(UiMode::MAIN);
+                return;
+            }
+
+            beginTextInput("Edit TG", String(favoriteTGs[menuIndex]),
+                           true, false, 2000 + menuIndex);
+            return;
+        }
+        drawTgMenu();
+        return;
+    }
+}
+
+
+static void saveWifiConfig()
+{
+    saveSettings();
+}
+
+static void clearWifiConfig()
+{
+    if (udpStarted) {
+        udp.stop();
+        udpStarted = false;
+    }
+    memset(&wifiConfig, 0, sizeof(wifiConfig));
+    saveWifiConfig();
+}
+
+static bool wifiConfigured()
+{
+    return wifiConfig.s
