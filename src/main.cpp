@@ -2629,7 +2629,7 @@ static void stopTxMicCapture()
 
 static void processTxPcmDebug()
 {
-    if (!txCaptureActive() || !txPcmQueue) return;
+    if (!txPcmQueue) return;
 
     TxPcmFrame frame;
     while (xQueueReceive(txPcmQueue, &frame, 0) == pdTRUE) {
@@ -2797,12 +2797,16 @@ static void endPttTest()
 
     const unsigned long elapsed = millis() - txStateStartedMs;
 
-    // Stop producing PCM first, then consume any complete queued frames.
+    // Clear the active capture state BEFORE Mic.end(). A buffer-release callback
+    // may run while the driver is shutting down; it must never requeue capture.
+    txState = TxState::IDLE;
+
     M5Cardputer.Mic.end();
     M5Cardputer.Mic.setBufferReleaseCallback(nullptr, nullptr);
 
+    // Drain complete PCM frames already captured before the stop.
     processTxPcmDebug();
-    flushTxNetworkQueue(600);
+    flushTxNetworkQueue(1000);
 
     // A trailing 1-2 AMBE frame partial packet is intentionally discarded
     // rather than inventing an unverified silence codeword.
@@ -2812,7 +2816,6 @@ static void endPttTest()
         sendTxTerminator();
 
     txSessionAnnounced = false;
-    txState = TxState::IDLE;
     txStateStartedMs = 0;
 
     stopTxMicCapture();
