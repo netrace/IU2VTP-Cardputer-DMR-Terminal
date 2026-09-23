@@ -2739,45 +2739,48 @@ static void processTxPcmDebug()
 {
     if (!txPcmQueue) return;
 
+    // Consume at most one 20 ms PCM frame per loop iteration. Draining the
+    // entire PCM queue in one burst can create several 60 ms DMR packets at
+    // once and overflow the paced network queue even though the long-term
+    // production rate is correct.
     TxPcmFrame frame;
-    while (xQueueReceive(txPcmQueue, &frame, 0) == pdTRUE) {
-        ++txPcmFramesConsumed;
+    if (xQueueReceive(txPcmQueue, &frame, 0) != pdTRUE)
+        return;
 
-        // Alpha4 ends at a fully assembled 27-byte DMR voice payload.
-        // It is deliberately kept in a debug sink and is NOT sent to ODTP.
-        if (txAmbeEncoderAvailable()) {
-            uint8_t canonical[TX_AMBE_FRAME_BYTES] = {0};
+    ++txPcmFramesConsumed;
 
-            if (!txAmbeEncodePcm160(frame.pcm, canonical)) {
-                ++txAmbeEncodeFailures;
-                continue;
+    if (txAmbeEncoderAvailable()) {
+        uint8_t canonical[TX_AMBE_FRAME_BYTES] = {0};
+
+        if (!txAmbeEncodePcm160(frame.pcm, canonical)) {
+            ++txAmbeEncodeFailures;
+            return;
+        }
+
+        ++txAmbeFramesEncoded;
+
+        uint8_t dmr9[9] = {0};
+        dmrCanonical72ToInterleaved(canonical, dmr9);
+        ++txDmrFramesInterleaved;
+
+        memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
+        ++txDmrFrameIndex;
+
+        if (txDmrFrameIndex == 3) {
+            memcpy(txLastDmrPayload, txDmrPacketBuild, 27);
+            ++txDmrPacketsBuilt;
+            txDmrFrameIndex = 0;
+
+            TxDmrPacket pkt;
+            memcpy(pkt.payload, txLastDmrPayload, sizeof(pkt.payload));
+            if (!txDmrPacketQueue ||
+                xQueueSend(txDmrPacketQueue, &pkt, 0) != pdTRUE) {
+                ++txNetworkPacketDrops;
             }
 
-            ++txAmbeFramesEncoded;
-
-            uint8_t dmr9[9] = {0};
-            dmrCanonical72ToInterleaved(canonical, dmr9);
-            ++txDmrFramesInterleaved;
-
-            memcpy(txDmrPacketBuild + txDmrFrameIndex * 9, dmr9, 9);
-            ++txDmrFrameIndex;
-
-            if (txDmrFrameIndex == 3) {
-                memcpy(txLastDmrPayload, txDmrPacketBuild, 27);
-                ++txDmrPacketsBuilt;
-                txDmrFrameIndex = 0;
-
-                TxDmrPacket pkt;
-                memcpy(pkt.payload, txLastDmrPayload, sizeof(pkt.payload));
-                if (!txDmrPacketQueue ||
-                    xQueueSend(txDmrPacketQueue, &pkt, 0) != pdTRUE) {
-                    ++txNetworkPacketDrops;
-                }
-
-                if (txDmrPacketsBuilt == 1) {
-                    Serial.print("[PTT/DMR] first 27-byte payload: ");
-                    printHex(txLastDmrPayload, 27);
-                }
+            if (txDmrPacketsBuilt == 1) {
+                Serial.print("[PTT/DMR] first 27-byte payload: ");
+                printHex(txLastDmrPayload, 27);
             }
         }
     }
@@ -3758,8 +3761,8 @@ void loop()
     }
 
     handleKeyboard();
-    processTxPcmDebug();
     processTxNetwork();
+    processTxPcmDebug();
 
     if (txCaptureActive()) {
         if (WiFi.status() != WL_CONNECTED || !udpStarted) {
