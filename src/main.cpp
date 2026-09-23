@@ -20,7 +20,7 @@ extern "C" {
 
 static constexpr const char* APP_NAME = "IU2VTP Cardputer DMR Terminal";
 static constexpr const char* APP_VERSION = "1.1.0";
-static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.0";
+static constexpr const char* APP_TITLE = "IU2VTP Cardputer DMR Terminal v1.1.1";
 
 static constexpr int APP_HEADER_H = 14;
 static constexpr int APP_FOOTER_H = 24;
@@ -53,7 +53,7 @@ void mbe_checkGolayBlock(long int *block);
 }
 
 // ============================================================
-// IU2VTP Cardputer DMR Terminal v1.1.0
+// IU2VTP Cardputer DMR Terminal v1.1.1
 // Verified RX/TX Rewind / Open DMR Terminal implementation.
 // G0 / BtnA is the primary hold-to-talk control; P is a keyboard fallback.
 // ============================================================
@@ -3788,7 +3788,7 @@ void setup()
 
     Serial.println();
     Serial.println("============================================");
-    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.0-alpha6");
+    Serial.println(" IU2VTP Cardputer DMR Terminal v1.1.1");
     Serial.println(" classic mbelib + Cardputer speaker");
     Serial.println("============================================");
     Serial.println("classic mbelib / speaker 48 kHz / TX experimental");
