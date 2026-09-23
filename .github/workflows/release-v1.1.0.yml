@@ -1,0 +1,126 @@
+name: Publish v1.1.0
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-v1.1.0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  TARGET_SHA: d197c9d4cb885835e931c469713961c10196e29e
+  TAG: v1.1.0
+  SOURCE_RUN_ID: "35927100991"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+
+      - name: Create annotated tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists"
+          else
+            git tag -a "${TAG}" "${TARGET_SHA}" -m "v1.1.0 - Live ODTP PTT/TX"
+            git push origin "${TAG}"
+          fi
+
+      - name: Download validated firmware artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-assets
+          gh run download "${SOURCE_RUN_ID}" \
+            --repo "${{ github.repository }}" \
+            --name cardputer-v1.1.0 \
+            --dir release-assets
+          ls -lh release-assets
+
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## IU2VTP Cardputer DMR Terminal v1.1.0
+
+          This release adds fully working DMR transmission over Rewind / Open DMR Terminal Protocol.
+
+          ### New
+          - Live PTT/TX from the M5Stack Cardputer
+          - Physical G0 / BtnA hold-to-talk
+          - Keyboard P fallback PTT
+          - Group voice transmission
+          - Private voice transmission by DMR ID
+          - GROUP / PRIVATE mode switching
+          - Embedded AMBE+2 encoding with blip25-vocoder
+          - Cardputer microphone capture and 16 kHz -> 8 kHz conversion
+          - Half-duplex speaker/microphone handling
+          - DMR AMBE rW/rX/rY/rZ TX interleave
+          - 27-byte ODTP voice payload generation
+          - Correct DMR Voice LC call setup
+          - RS(12,9) Voice LC parity
+          - TX pacing and monotonic realtime sequence handling
+          - BUSY / FAILURE / network-loss abort handling
+          - Maximum TX timeout and re-key protection
+
+          ### Verified ODTP TX sequence
+
+          ```text
+          0x0911 Voice LC
+          0x0911 Voice LC
+          0x0920 DMR audio
+          ...
+          0x0912 Terminator
+          ```
+
+          Live group TX and microphone audio were successfully validated against Open DMR Terminal servers.
+
+          ### RX
+
+          The known-good classic-mbelib receive pipeline remains supported and unchanged.
+
+          ### Hardware
+
+          - M5Stack Cardputer
+          - StampS3 / ESP32-S3
+          EOF
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+          else
+            gh release create "${TAG}" \
+              release-assets/IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin \
+              release-assets/IU2VTP_Cardputer_DMR_Terminal_v1.1.0.bin.sha256 \
+              --repo "${{ github.repository }}" \
+              --target "${TARGET_SHA}" \
+              --title "v1.1.0 - Live ODTP PTT/TX" \
+              --notes-file RELEASE_NOTES.md
+          fi
+
+      - name: Remove one-shot workflow
+        if: success()
+        run: |
+          git fetch origin main
+          git checkout -B cleanup origin/main
+          rm -f .github/workflows/release-v1.1.0.yml
+          git add .github/workflows/release-v1.1.0.yml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Remove v1.1.0 release workflow"
+          git push origin cleanup:main
