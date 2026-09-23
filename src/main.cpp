@@ -1331,7 +1331,8 @@ void sendControl(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
 
 static bool sendRealtime(uint16_t type, const uint8_t* payload, uint16_t payloadLen)
 {
-    const uint32_t seq = realtimeSeqNo++;
+    // Z3DMR uses AtomicInteger.incrementAndGet(): first realtime packet is 1.
+    const uint32_t seq = ++realtimeSeqNo;
     if (type != PKT_DMR_AUDIO || seq < 8) {
         Serial.printf("[TX RT] type=0x%04X flags=0x%04X seq=%lu len=%u",
                       type, REWIND_FLAG_REAL_TIME_1,
@@ -1376,29 +1377,72 @@ static bool sendTxVoiceHeaders()
     return true;
 }
 
-static bool sendTxSuperHeader()
+static uint8_t gf256Mul(uint8_t a, uint8_t b)
 {
-    uint8_t payload[32] = {0};
+    uint8_t r = 0;
+    while (b) {
+        if (b & 1U) r ^= a;
+        const bool hi = (a & 0x80U) != 0;
+        a <<= 1;
+        if (hi) a ^= 0x1DU; // GF(256), primitive polynomial x^8+x^4+x^3+x^2+1
+        b >>= 1;
+    }
+    return r;
+}
+
+static void buildTxVoiceLc(uint8_t out[12])
+{
+    memset(out, 0, 12);
+
+    // DMR Full Link Control: FLCO, FID, service options, destination, source.
+    out[0] = (txCallMode == TxCallMode::PRIVATE) ? 0x03 : 0x00;
+    out[1] = 0x00;
+    out[2] = 0x00;
 
     const uint32_t dst = txDestinationId();
-    const uint32_t sessionType = txSessionType();
+    const uint32_t src = profileRadioId();
 
-    // Match the known-working ODMRTP transmitter exactly: populate the
-    // source callsign field and leave the 10-byte target callsign field zeroed.
-    // Destination routing is already carried by targetId.
-    rewindTxBuildSuperHeader(payload,
-                             sessionType,
-                             profileRadioId(),
-                             dst,
-                             "IU2VTP",
-                             nullptr);
+    out[3] = (uint8_t)((dst >> 16) & 0xFF);
+    out[4] = (uint8_t)((dst >> 8) & 0xFF);
+    out[5] = (uint8_t)(dst & 0xFF);
+    out[6] = (uint8_t)((src >> 16) & 0xFF);
+    out[7] = (uint8_t)((src >> 8) & 0xFF);
+    out[8] = (uint8_t)(src & 0xFF);
 
-    const bool ok = sendRealtime(PKT_SUPERHEADER, payload, sizeof(payload));
-    if (ok)
-        Serial.printf("[PTT/TX] SUPERHEADER mode=%s src=%lu dst=%lu\n",
+    // RS(12,9) parity, same generator used by BrandMeister/DMRHost:
+    // 64*x^3 + 56*x^2 + 14*x + 1. Voice-LC parity is masked with 0x96.
+    uint8_t p0 = 0, p1 = 0, p2 = 0;
+    for (size_t i = 0; i < 9; ++i) {
+        const uint8_t d = out[i] ^ p2;
+        p2 = p1 ^ gf256Mul(14, d);
+        p1 = p0 ^ gf256Mul(56, d);
+        p0 = gf256Mul(64, d);
+    }
+
+    out[9]  = p2 ^ 0x96;
+    out[10] = p1 ^ 0x96;
+    out[11] = p0 ^ 0x96;
+}
+
+static bool sendTxVoiceHeader()
+{
+    uint8_t lc[12];
+    buildTxVoiceLc(lc);
+
+    // Z3DMR sends the 0x0911 Voice LC header twice before AMBE audio.
+    bool ok = true;
+    for (int i = 0; i < 2; ++i) {
+        if (!sendRealtime(PKT_DMR_HEADER_FLC, lc, sizeof(lc)))
+            ok = false;
+    }
+
+    if (ok) {
+        Serial.printf("[PTT/TX] VOICE_LC x2 mode=%s src=%lu dst=%lu: ",
                       txCallModeLabel(),
                       (unsigned long)profileRadioId(),
-                      (unsigned long)dst);
+                      (unsigned long)txDestinationId());
+        printHex(lc, sizeof(lc));
+    }
     return ok;
 }
 
