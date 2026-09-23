@@ -11,17 +11,17 @@ permissions:
   actions: read
 
 env:
-  TARGET_SHA: 79ee6b07ad309569138d9c30f3548ac3fed02954
+  TARGET_SHA: 3ff4871c6d39900d60a5f1af0cfdc9372d1d6f0c
   TAG: v1.1.1
-  EXPECTED_RUN_ID: "35932983947"
+  EXPECTED_RUN_ID: "35933229923"
 
 jobs:
   release:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_sha == '79ee6b07ad309569138d9c30f3548ac3fed02954' &&
-       github.event.workflow_run.id == 35932983947)
+       github.event.workflow_run.head_sha == '3ff4871c6d39900d60a5f1af0cfdc9372d1d6f0c' &&
+       github.event.workflow_run.id == 35933229923)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release target
