@@ -387,6 +387,27 @@ static void drawVolumeMenu();
 static void drawInputBox();
 static void abortTxSession(const char* reason);
 
+static bool rxTrafficActive()
+{
+    // A recent voice packet is sufficient to consider the channel busy even
+    // if the call-state mutex is momentarily unavailable.
+    if (lastVoicePacketMs && millis() - lastVoicePacketMs <= 1500UL)
+        return true;
+
+    if (!callInfoMutex)
+        return false;
+
+    bool active = false;
+    if (xSemaphoreTake(callInfoMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        active = callInfo.active;
+        xSemaphoreGive(callInfoMutex);
+    } else {
+        // Fail closed: do not key TX while RX state cannot be inspected.
+        active = true;
+    }
+    return active;
+}
+
 // ------------------------------------------------------------
 // Persistent settings
 // ------------------------------------------------------------
@@ -3017,6 +3038,12 @@ static void abortTxSession(const char* reason)
 static void beginPttTest()
 {
     if (txState != TxState::IDLE) return;
+
+    if (rxTrafficActive()) {
+        setUiNotice("RX active - PTT blocked");
+        Serial.println("[PTT] ignored: RX traffic active");
+        return;
+    }
 
     if (uiMode != UiMode::MAIN || !dmrSessionReady()) {
         setUiNotice("PTT unavailable: DMR not ready");
