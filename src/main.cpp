@@ -9,6 +9,7 @@
 #include "config.h"
 #include "tx_ambe_encoder.h"
 #include "dmr_ambe_mapping.h"
+#include "rewind_tx_protocol.h"
 
 extern "C" {
 #include <mbelib.h>
@@ -1254,11 +1255,7 @@ static bool sendRewindPacket(uint16_t type, uint16_t flags, uint32_t sequence,
     }
 
     uint8_t h[HEADER_LEN] = {0};
-    memcpy(h, REWIND_SIGN, 8);
-    put16le(h + 8, type);
-    put16le(h + 10, flags);
-    put32le(h + 12, sequence);
-    put16le(h + 16, payloadLen);
+    rewindTxBuildHeader(h, type, flags, sequence, payloadLen);
 
     if (!udp.beginPacket(bmIP, profilePort()))
         return false;
@@ -1294,25 +1291,18 @@ static bool sendRealtime(uint16_t type, const uint8_t* payload, uint16_t payload
     return ok;
 }
 
-static void putCallsign10(uint8_t* dst, const char* call)
-{
-    memset(dst, 0, 10);
-    if (!call) return;
-    for (size_t i = 0; i < 10 && call[i]; ++i)
-        dst[i] = (uint8_t)call[i];
-}
-
 static bool sendTxSuperHeader()
 {
     uint8_t payload[32] = {0};
-    put32le(payload + 0, SESSION_GROUP_VOICE);
-    put32le(payload + 4, profileRadioId());
-    put32le(payload + 8, activeTG);
-    putCallsign10(payload + 12, "IU2VTP");
 
     char target[11] = {0};
     snprintf(target, sizeof(target), "TG%lu", (unsigned long)activeTG);
-    putCallsign10(payload + 22, target);
+
+    rewindTxBuildGroupSuperHeader(payload,
+                                  profileRadioId(),
+                                  activeTG,
+                                  "IU2VTP",
+                                  target);
 
     const bool ok = sendRealtime(PKT_SUPERHEADER, payload, sizeof(payload));
     if (ok)
