@@ -3,6 +3,7 @@ name: Fast AMBE Rust link test
 on:
   push:
     branches:
+      - main
       - feature/ptt-tx
     paths:
       - "scripts/link_tx_ambe_rust.py"
