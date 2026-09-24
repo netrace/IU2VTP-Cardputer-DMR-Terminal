@@ -2,6 +2,10 @@
 
 A compact **DMR-over-IP RX/TX terminal** for the **M5Stack Cardputer / StampS3**.
 
+<p align="center">
+  <img src="docs/cardputer-dmr-terminal.jpg" alt="IU2VTP Cardputer DMR Terminal running on M5Stack Cardputer" width="800">
+</p>
+
 It connects to compatible Open DMR Terminal Protocol / Rewind servers, authenticates, subscribes to a selected talkgroup, receives and decodes DMR audio, and can transmit live microphone audio with hold-to-talk PTT.
 
 ## Features
