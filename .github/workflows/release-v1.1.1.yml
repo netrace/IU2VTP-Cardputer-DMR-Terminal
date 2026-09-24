@@ -35,6 +35,15 @@ jobs:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 0
 
+      - name: Verify existing release tag and validated build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse "refs/tags/${TAG}^{commit}")" = "${TARGET_SHA}"
+          gh api "repos/${{ github.repository }}/actions/runs/${EXPECTED_RUN_ID}" \
+            --jq '[.head_sha, .conclusion] | join(" ")' > /tmp/release-build.txt
+          test "$(cat /tmp/release-build.txt)" = "${TARGET_SHA} success"
+
       - name: Download validated v1.1.1 firmware artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,7 +53,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --name cardputer-v1.1.1 \
             --dir release-assets
-          ls -lh release-assets
+          (cd release-assets && sha256sum -c IU2VTP_Cardputer_DMR_Terminal_v1.1.1.bin.sha256)
 
       - name: Write release notes
         run: |
@@ -87,20 +96,10 @@ jobs:
               release-assets/IU2VTP_Cardputer_DMR_Terminal_v1.1.1.bin \
               release-assets/IU2VTP_Cardputer_DMR_Terminal_v1.1.1.bin.sha256 \
               --repo "${{ github.repository }}" \
-              --target "${TARGET_SHA}" \
+              --verify-tag \
               --title "v1.1.1 - TX buffer drain and RX PTT interlock" \
               --notes-file RELEASE_NOTES.md
           fi
 
-      - name: Remove one-shot workflow
-        if: success()
-        run: |
-          git fetch origin main
-          git checkout -B cleanup origin/main
-          rm -f .github/workflows/release-v1.1.1.yml
-          git add .github/workflows/release-v1.1.1.yml
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git commit -m "Remove v1.1.1 release workflow"
-          git push origin cleanup:main
+      # Workflow-file deletion requires workflow authorization; perform it externally
+      # only after the published assets and tag have been verified.
