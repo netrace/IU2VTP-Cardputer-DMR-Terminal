@@ -1,0 +1,57 @@
+name: Add README photo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".tmp-image/chunk08.b64"
+
+permissions:
+  contents: write
+
+jobs:
+  add-photo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble EXIF-free image and update README
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          cat .tmp-image/chunk*.b64 | base64 -d > docs/cardputer-dmr-terminal.jpg
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("README.md")
+          s = p.read_text()
+
+          block = """
+<p align="center">
+  <img src="docs/cardputer-dmr-terminal.jpg" alt="IU2VTP Cardputer DMR Terminal running on M5Stack Cardputer" width="800">
+</p>
+"""
+
+          marker = "docs/cardputer-dmr-terminal.jpg"
+          if marker not in s:
+              needle = "A compact **DMR-over-IP RX/TX terminal** for the **M5Stack Cardputer / StampS3**.\n"
+              if needle not in s:
+                  raise SystemExit("README insertion point not found")
+              s = s.replace(needle, needle + "\n" + block, 1)
+              p.write_text(s)
+          PY
+
+      - name: Commit photo and cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -rf .tmp-image
+          rm -f .github/workflows/add-readme-photo.yml
+          git add README.md docs/cardputer-dmr-terminal.jpg .tmp-image .github/workflows/add-readme-photo.yml
+          git commit -m "Add Cardputer DMR Terminal photo to README"
+          git push
